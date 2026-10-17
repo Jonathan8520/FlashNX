@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <atomic>
+#include <strings.h>
 #include <sys/stat.h>
 
 #include "ruffle_bridge.h"
@@ -1218,6 +1219,59 @@ static void register_sphaira_assoc(const char* self_nro) {
     std::fprintf(f, "path=%s\nsupported_extensions=swf\n", nro);
     std::fclose(f);
     std::printf("sphaira: registered .swf association -> %s (launcher %s)\n", ini, nro);
+    std::fflush(stdout);
+}
+
+// Where the HOME-menu tiles find FlashNX when it is not at its usual place.
+//
+// A tile's forwarder loads `sdmc:/switch/FlashNX/FlashNX.nro`, the path the
+// README and the Homebrew App Store use. A `.nro` taken from the releases is
+// often dropped straight into `/switch/` instead, where FlashNX runs fine and
+// every tile it installs fails to start (2346-0003). So FlashNX notes the path it
+// was started from, and the forwarder reads the note when the usual path holds
+// nothing (see `forwarder/source/main.c`).
+//
+// Written only when it says something: at the usual path the note is never
+// read, and an unchanged note is not written again, so a normal boot costs one
+// string compare. Must stay out of self-contained builds (#106), like the
+// Sphaira association: tiles would then start that one game whatever they were
+// made for.
+static void remember_own_path(const char* self_nro) {
+    static const char* const usual = "sdmc:/switch/FlashNX/FlashNX.nro";
+    static const char* const note = "sdmc:/switch/FlashNX/tiles/nro.path";
+    if (!self_nro || !self_nro[0]) return;
+    char path[512];
+    if (self_nro[0] == '/') {
+        std::snprintf(path, sizeof(path), "sdmc:%s", self_nro);
+    } else if (std::strncmp(self_nro, "sdmc:/", 6) == 0) {
+        std::snprintf(path, sizeof(path), "%s", self_nro);
+    } else {
+        return; // not on the card, the only device the forwarder mounts
+    }
+    const size_t n = std::strlen(path);
+    if (n < 4 || strcasecmp(path + n - 4, ".nro") != 0) return;
+    if (strcasecmp(path, usual) == 0) return;
+    struct stat st;
+    if (::stat(path, &st) != 0) return; // argv[0] cut at a space, or a stale path
+
+    char old[512];
+    if (FILE* f = std::fopen(note, "rb")) {
+        const size_t got = std::fread(old, 1, sizeof(old) - 1, f);
+        std::fclose(f);
+        old[got] = '\0';
+        if (std::strcmp(old, path) == 0) return;
+    }
+    ::mkdir("sdmc:/switch/FlashNX", 0777);
+    ::mkdir("sdmc:/switch/FlashNX/tiles", 0777);
+    FILE* f = std::fopen(note, "wb");
+    if (!f) {
+        std::printf("tiles: could not write %s\n", note);
+        std::fflush(stdout);
+        return;
+    }
+    std::fputs(path, f);
+    std::fclose(f);
+    std::printf("tiles: FlashNX runs from %s, noted in %s for the HOME Menu tiles\n", path, note);
     std::fflush(stdout);
 }
 
@@ -3244,6 +3298,7 @@ int main(int argc, char** argv) {
     // file exists yet and then leaves it alone forever.
     if (!embedded_swf) {
         register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
+        remember_own_path(argc > 0 ? argv[0] : nullptr);
     }
     std::printf("boot: main() pre-worker done at %.0f ms\n", boot_ms_since(g_boot_t0));
     std::fflush(stdout);

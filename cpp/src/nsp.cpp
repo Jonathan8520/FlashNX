@@ -937,7 +937,34 @@ extern "C" int nsp_write_file(u64 program_id, const char* title, const char* swf
                               const unsigned char* icon, unsigned int icon_len,
                               const char* out_path, char* err, unsigned int err_cap);
 
-/// Build a tile and install it. 1 on success, 0 on failure with `err` set.
+/// Open the control content of a tile that was just registered, the way the
+/// HOME menu does to read its name and icon.
+static Result open_installed_control(NcmContentStorage* cs, u64 program_id,
+                                     const BuiltNca& control) {
+    NcmContentId id;
+    std::memcpy(id.c, control.content_id, 16);
+    char path[FS_MAX_PATH] = {};
+    Result rc = ncmContentStorageGetPath(cs, path, sizeof(path), &id);
+    if (R_FAILED(rc)) return rc;
+    FsFileSystem fs;
+    rc = fsOpenFileSystemWithId(&fs, program_id, FsFileSystemType_ContentControl, path,
+                                FsContentAttributes_None);
+    if (R_SUCCEEDED(rc)) fsFsClose(&fs);
+    return rc;
+}
+
+/// `fs` refusing an NCA for its signature: `NcaHeaderSignature1VerificationFailed`
+/// (2002-4518) and its neighbours, as Atmosphère's `fs_results.hpp` lists them.
+/// Module 2 is `fs` (the "2002" of the error code); libnx names no constant for it.
+static bool is_signature_refusal(Result rc) {
+    if (R_SUCCEEDED(rc) || R_MODULE(rc) != 2) return false;
+    const u32 d = R_DESCRIPTION(rc);
+    return (d >= 4517 && d <= 4519) || (d >= 4057 && d <= 4059);
+}
+
+/// Build a tile and install it. 1 on success, 2 when the console refuses the
+/// tile's signature (no signature patches, or patches a firmware update left
+/// behind), 0 on any other failure. `err` is set on every failure.
 ///
 /// `err` is filled with something specific on every path, because the failures
 /// here are not interchangeable: a console without signature patches, a full SD
@@ -1058,6 +1085,36 @@ extern "C" int nsp_install_tile(u64 program_id, const char* title, const char* s
         return 0;
     }
     meta_committed = true;
+
+    // Will the console open what it was just given? Nothing above looked at a
+    // signature: `ncm` stores bytes and the meta database stores a list. The
+    // first to check is `fs`, when the HOME menu reads the tile or the loader
+    // starts it, so a console without signature patches took the whole install,
+    // showed the tile, and refused it the moment it was pressed. Opening the
+    // control content here is that same refusal, before the record makes
+    // anything visible on the home screen.
+    //
+    // Only the signature result stops the install. Any other failure is this
+    // check failing, not the tile, and a console whose tiles work must not lose
+    // them to it.
+    {
+        const Result probe = open_installed_control(&cs, program_id, tile.control);
+        if (is_signature_refusal(probe)) {
+            std::snprintf(err, err_cap, "signature refused 0x%x", probe);
+            std::printf("nsp: the console refuses the tile's signature (0x%x): no signature patches\n",
+                        probe);
+            std::fflush(stdout);
+            rollback();
+            cleanup();
+            return 2;
+        }
+        if (R_FAILED(probe)) {
+            std::printf("nsp: could not check the signature (0x%x), installing anyway\n", probe);
+        } else {
+            std::printf("nsp: the console opens the tile (signature patches present)\n");
+        }
+        std::fflush(stdout);
+    }
 
     // The storage handles stay open past this point on purpose: if the record
     // push fails, `rollback` still needs them.

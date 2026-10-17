@@ -2,6 +2,13 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## Unreleased
+
+### Fixed
+
+- **HOME Menu icons on a console without signature patches** (#129). Installing an icon used to succeed there and leave a tile that refused to start. FlashNX now checks that the console accepts the tile before adding it, and otherwise says that it needs signature patches (sys-patch), leaving nothing on the home screen.
+- **HOME Menu icons when FlashNX is not in `/switch/FlashNX/`.** A tile only looked for `sdmc:/switch/FlashNX/FlashNX.nro` and failed to start (2346-0003) when the `.nro` was somewhere else, such as straight in `/switch/`. FlashNX now notes where it was started from, and tiles look there when the usual place is empty. Icons installed by 2.0.0 keep the old behaviour until they are installed again (turn "Icon on the HOME Menu" off and on in the game's options).
+
 ## v2.0.0 (2026-10-16)
 
 The whole interface is redrawn, up to four players can play at once (each on a single Joy-Con if they like), and a Flash game can become its own Switch app with a script that needs nothing but Python. Every screen uses the console's own fonts, at their real size and with every accent, Cyrillic and Chinese character drawn properly; buttons are shown with the console's own glyphs; and the menus share one set of parts, so the same thing looks and behaves the same on every page. Changing a setting now takes a deliberate press, and every screen shown over a game has a layout for games turned on their side.

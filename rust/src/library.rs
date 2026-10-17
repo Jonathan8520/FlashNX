@@ -2316,8 +2316,9 @@ extern "C" {
     /// line, redeclared here because that extern block is private — the same
     /// per-module duplication `ruffle_tick_now` and `ruffle_log_cstr` already use.
     fn ruffle_is_docked() -> core::ffi::c_int;
-    /// Build a HOME-menu tile for one game and install it. 1 on success, 0 on
-    /// failure with `err` filled in (see cpp/src/nsp.cpp).
+    /// Build a HOME-menu tile for one game and install it. 1 on success, 2 when
+    /// the console refuses the tile's signature, 0 on any other failure; `err`
+    /// is filled in on both failures (see cpp/src/nsp.cpp).
     ///
     /// Not cheap, unlike the `.nro` shortcut this replaced: it builds three NCAs
     /// and writes them through `ncm`, so it takes a moment and it talks to
@@ -10691,12 +10692,14 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                         // The reason is in the toast and not only in the log: a
                         // console without signature patches and a full card fail
                         // the same way from the menu, and the player is the one
-                        // who has to tell them apart.
-                        set_toast(
-                            s,
-                            std::format!("{} ({})", lc.shortcut_err, reason),
-                            TOAST_ERR,
-                        );
+                        // who has to tell them apart. The first is the common one
+                        // and the player can fix it, so it is said in words.
+                        let msg = if rc == 2 {
+                            lc.shortcut_err_patches.to_string()
+                        } else {
+                            std::format!("{} ({})", lc.shortcut_err, reason)
+                        };
+                        set_toast(s, msg, TOAST_ERR);
                     }
                     return;
                 }

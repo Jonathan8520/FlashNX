@@ -29,6 +29,10 @@
 // intended coupling: updating FlashNX updates what every tile launches.
 #define DEFAULT_NRO "sdmc:/switch/FlashNX/FlashNX.nro"
 
+// Where FlashNX was started from, when that is not DEFAULT_NRO: one line,
+// written by FlashNX itself (`remember_own_path` in cpp/src/main.cpp).
+#define NRO_NOTE "sdmc:/switch/FlashNX/tiles/nro.path"
+
 // `sdmc:/switch/FlashNX/tiles/<16 hex digits>.cfg`, written by the installer.
 #define TILE_CFG_FMT "sdmc:/switch/FlashNX/tiles/%016lX.cfg"
 
@@ -39,6 +43,7 @@ const char g_noticeText[] =
 static char g_argv[2048];
 static char g_nextArgv[2048];
 static char g_nextNroPath[512];
+static char g_tileCfg[64]; // this tile's config path, the argument FlashNX gets
 u64  g_nroAddr = 0;
 static u64  g_nroSize = 0;
 static NroHeader g_nroHeader;
@@ -336,6 +341,36 @@ static void getCodeMemoryCapability(void)
     }
 }
 
+// Open the FlashNX that NRO_NOTE names and give it this tile's argument behind
+// its own path. -1 when there is no note or it names no file.
+static int openNotedNro(void)
+{
+    char path[sizeof g_nextNroPath];
+    int nfd = open(NRO_NOTE, O_RDONLY);
+    if (nfd < 0)
+        return -1;
+    ssize_t n = read(nfd, path, sizeof(path) - 1);
+    close(nfd);
+    if (n <= 0)
+        return -1;
+    path[n] = '\0';
+    for (ssize_t i = 0; i < n; i++) {
+        if (path[i] == '\r' || path[i] == '\n') {
+            path[i] = '\0';
+            break;
+        }
+    }
+    // The card is the only device mounted here, and a quote would break argv.
+    if (strncmp(path, "sdmc:/", 6) != 0 || strchr(path, '"') != NULL)
+        return -1;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    // Quoted: a folder name can hold a space, and argv is re-split on spaces.
+    snprintf(g_argv, sizeof g_argv, "\"%s\" %s", path, g_tileCfg);
+    return fd;
+}
+
 void loadNro(void)
 {
     NroHeader* header = NULL;
@@ -407,6 +442,11 @@ void loadNro(void)
         diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 404));
 
     int fd = open(g_nextNroPath, O_RDONLY);
+    // FlashNX is not where tiles expect it: the one FlashNX noted instead.
+    // Only in place of DEFAULT_NRO, so a path somebody asked for explicitly is
+    // never swapped for another.
+    if (fd < 0 && strcmp(g_nextNroPath, DEFAULT_NRO) == 0)
+        fd = openNotedNro();
     if (fd < 0)
         diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 3));
 
@@ -558,18 +598,21 @@ void loadNro(void)
 // FlashNX, where there is a screen to say so.
 //
 // If the program ID cannot be read (pre-3.0.0), both fields stay empty and
-// `loadNro` falls back to DEFAULT_NRO with no argument: FlashNX then opens on
-// its library instead of on the game. A worse tile, still a working one.
+// `loadNro` exits at once, back to the HOME menu.
+//
+// DEFAULT_NRO is only the first choice: when nothing is there, `loadNro` (which
+// has the card mounted) tries the path FlashNX noted for itself in NRO_NOTE.
 static void setForwarderTarget(void)
 {
     u64 program_id = 0;
     if (R_FAILED(svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)))
         return;
 
+    snprintf(g_tileCfg, sizeof(g_tileCfg), TILE_CFG_FMT, program_id);
     snprintf(g_nextNroPath, sizeof(g_nextNroPath), "%s", DEFAULT_NRO);
     // argv[0] is the NRO's own path, as hbmenu and every forwarder pass it;
     // FlashNX skips it and scans the rest (see `worker_entry` in main.cpp).
-    snprintf(g_nextArgv, sizeof(g_nextArgv), "%s " TILE_CFG_FMT, DEFAULT_NRO, program_id);
+    snprintf(g_nextArgv, sizeof(g_nextArgv), "%s %s", DEFAULT_NRO, g_tileCfg);
 }
 
 int main(int argc, char **argv)
