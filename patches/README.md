@@ -411,6 +411,25 @@ Menu/init()` before, its menu class started and no script error after. The
 ordering in the new tests' `output.txt` is inferred from those Flash outputs,
 not generated under Flash.
 
+**`core/src/loader.rs`, `avm2/object/loaderinfo_object.rs` — the URL of an
+ActionScript 3 movie loaded with `Loader.loadBytes` (FlashNX #130, backport of
+upstream ruffle#24025, `09efa268d`, plus the effect of `f8509a30f`).**
+
+Flash Player gives such a movie the loading SWF's URL followed by
+"/[[DYNAMIC]]/<n>"; our base gave it "file:///". Happy Wheels' preloader
+decrypts the game and loads it with `loadBytes`, and the game only starts
+when `root.loaderInfo.url` contains "totaljerkface.com": with "file:///" it
+stopped after the preloader. AS3 movies only (`flashnx_is_as3`, read from
+their FileAttributes tag without inflating the whole movie twice): an AS2
+movie's SharedObjects are stored under its own URL (avm1 shared_object.rs),
+so an AS2 game unwrapped by an AS3 loader would lose its saves, while AS3
+ones go under the root movie's URL. `loaderinfo_object.rs` recognised a
+loadBytes movie by "file:///" to send it no httpStatus; it now also
+recognises "/[[DYNAMIC]]/" (upstream stores the fact on `SwfMovie`, a
+signature change everywhere). `LoaderLoadBytesTest` now passes (upstream's
+test change taken); `LoaderLoadBytesTest2` stays a known failure, its
+70-byte loadee not being AS3.
+
 **Super Smash Flash 2, October 2026: memory and speed.** Measured on the
 console over a dozen sessions; the full suite (host build, GNU toolchain)
 passes 4063 tests with the same two known failures after each step. The

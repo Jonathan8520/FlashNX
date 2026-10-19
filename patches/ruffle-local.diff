@@ -4537,10 +4537,23 @@ index 0e6f47c5c..88661652d 100644
          activation: &mut Activation<'_, 'gc>,
          status: u16,
 diff --git a/core/src/avm2/object/loaderinfo_object.rs b/core/src/avm2/object/loaderinfo_object.rs
-index 9906b5dcf..fb06810fd 100644
+index 9906b5dcf..49f8397e5 100644
 --- a/core/src/avm2/object/loaderinfo_object.rs
 +++ b/core/src/avm2/object/loaderinfo_object.rs
-@@ -264,6 +264,12 @@ impl<'gc> LoaderInfoObject<'gc> {
+@@ -215,7 +215,11 @@ impl<'gc> LoaderInfoObject<'gc> {
+                     root.as_movie_clip()
+                         .map(|mc| mc.loaded_bytes() as i32 >= mc.total_bytes())
+                         .unwrap_or(true),
+-                    movie.url() != "file:///",
++                    // FlashNX: a movie from `Loader.loadBytes` gets no
++                    // httpStatus; since the loadBytes URL backport (loader.rs)
++                    // an AS3 one is "<loader>/[[DYNAMIC]]/1", not "file:///".
++                    // Upstream stores the fact on SwfMovie instead (f8509a30f).
++                    movie.url() != "file:///" && !movie.url().contains("/[[DYNAMIC]]/"),
+                 ),
+                 _ => (false, false),
+             };
+@@ -264,6 +268,12 @@ impl<'gc> LoaderInfoObject<'gc> {
      }
  
      pub fn unload(self, context: &mut UpdateContext<'gc>) {
@@ -10163,7 +10176,7 @@ index 7cf6c74de..73221b047 100644
      pub fn default_font(
          &mut self,
 diff --git a/core/src/loader.rs b/core/src/loader.rs
-index 0018203a0..725493491 100644
+index 0018203a0..e4d213026 100644
 --- a/core/src/loader.rs
 +++ b/core/src/loader.rs
 @@ -33,7 +33,7 @@ use crate::limits::ExecutionLimit;
@@ -10213,25 +10226,76 @@ index 0018203a0..725493491 100644
              avm2_stub_method_context!(
                  uc,
                  "flash.display.Loader",
-@@ -895,7 +896,16 @@ impl<'gc> MovieLoader<'gc> {
+@@ -895,8 +896,67 @@ impl<'gc> MovieLoader<'gc> {
              return Ok(());
          }
  
 -        MovieLoader::movie_loader_data(handle, uc, &bytes, "file:///".into(), 0, false, loader_url)
++        // FlashNX: backport of upstream ruffle#24025 (09efa268d), for
++        // ActionScript 3 movies only. In Flash Player a movie loaded with
++        // `Loader.loadBytes` has the loading SWF's URL followed by
++        // "/[[DYNAMIC]]/<n>", and games check it: Happy Wheels only starts
++        // when `root.loaderInfo.url` names its site (#130), and "file:///"
++        // stopped it after its preloader. Not for ActionScript 2 movies: their
++        // SharedObjects are stored under their own movie's URL (avm1
++        // shared_object.rs), so an AS2 game unwrapped by an AS3 loader would
++        // lose its saves; AS3 ones go under the root movie's URL, unchanged.
++        let url = match (&loader_url, flashnx_is_as3(bytes.as_slice())) {
++            (Some(loader_url), Some(true)) => format!("{loader_url}/[[DYNAMIC]]/1"),
++            _ => "file:///".into(),
++        };
++
 +        MovieLoader::movie_loader_data(
 +            handle,
 +            uc,
 +            bytes.as_slice(),
-+            "file:///".into(),
++            url,
 +            0,
 +            false,
 +            loader_url,
 +            Some(&bytes),
 +        )
++    }
++}
++
++/// FlashNX: whether `bytes` is an ActionScript 3 movie, read from its first
++/// tag (FileAttributes) only, without inflating the whole movie twice.
++/// `None` when that cannot be told cheaply (LZMA, not a SWF).
++fn flashnx_is_as3(bytes: &[u8]) -> Option<bool> {
++    use std::io::Read;
++    let head: Vec<u8> = match bytes.get(0..3)? {
++        b"FWS" => bytes.get(..bytes.len().min(512))?.to_vec(),
++        b"CWS" => {
++            let mut out = bytes.get(..8)?.to_vec();
++            let mut buf = [0u8; 512];
++            let mut decoder = flate2::read::ZlibDecoder::new(bytes.get(8..)?);
++            let mut filled = 0;
++            while filled < buf.len() {
++                match decoder.read(&mut buf[filled..]) {
++                    Ok(0) | Err(_) => break,
++                    Ok(n) => filled += n,
++                }
++            }
++            out.extend_from_slice(&buf[..filled]);
++            out
++        }
++        _ => return None,
++    };
++    if *head.get(3)? < 9 {
++        return Some(false);
++    }
++    let nbits = (*head.get(8)? >> 3) as usize;
++    let first_tag = 8 + (5 + 4 * nbits).div_ceil(8) + 4;
++    let code_len = u16::from_le_bytes([*head.get(first_tag)?, *head.get(first_tag + 1)?]);
++    if code_len >> 6 != 69 {
++        return Some(false);
      }
++    let body = if code_len & 0x3F == 0x3F { first_tag + 6 } else { first_tag + 2 };
++    Some(*head.get(body)? & 0x08 != 0)
  }
  
-@@ -1600,6 +1610,8 @@ impl<'gc> MovieLoader<'gc> {
+ /// Kick off the root movie load.
+@@ -1600,6 +1660,8 @@ impl<'gc> MovieLoader<'gc> {
          status: u16,
          redirected: bool,
          loader_url: Option<String>,
@@ -10240,7 +10304,7 @@ index 0018203a0..725493491 100644
      ) -> Result<(), Error> {
          let sniffed_type = ContentType::sniff(data);
          let length = data.len();
-@@ -1607,7 +1619,9 @@ impl<'gc> MovieLoader<'gc> {
+@@ -1607,7 +1669,9 @@ impl<'gc> MovieLoader<'gc> {
          if sniffed_type == ContentType::Unknown
              && let Ok(data) = extract_swz(data)
          {
@@ -10251,7 +10315,7 @@ index 0018203a0..725493491 100644
          }
          let (clip, vm_data, from_bytes) = match uc.load_manager.get_loader(handle) {
              Some(Self {
-@@ -1648,7 +1662,12 @@ impl<'gc> MovieLoader<'gc> {
+@@ -1648,7 +1712,12 @@ impl<'gc> MovieLoader<'gc> {
  
          let movie = match sniffed_type {
              ContentType::Swf => {
@@ -10265,7 +10329,7 @@ index 0018203a0..725493491 100644
  
                  if matches!(vm_data, MovieLoaderVMData::Avm1 { .. }) {
                      // If AVM1 loads a SWF, that SWF is always interpreted as
-@@ -2042,6 +2061,8 @@ impl<'gc> MovieLoader<'gc> {
+@@ -2042,6 +2111,8 @@ impl<'gc> MovieLoader<'gc> {
              // frame behind objects placed by the timeline (even if they were
              // both placed in the same frame to begin with).
              mc.base().set_skip_next_enter_frame(true);
@@ -11917,6 +11981,35 @@ index 11e963f5a..f4f16330e 100644
 @@ -1,2 +1 @@
  num_frames = 30
 -known_failure = true
+diff --git a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/output.ruffle.txt b/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/output.ruffle.txt
+deleted file mode 100644
+index 9e04559ce..000000000
+--- a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/output.ruffle.txt
++++ /dev/null
+@@ -1,4 +0,0 @@
+-loading progress 0 821 TODO: make sure this is dispatched twice before content is initialized
+-from loadee: loaded
+-loadee initialized, url relative to swf: e:///
+-loading of 821 bytes complete
+diff --git a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/test.toml b/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/test.toml
+index cdbc92d04..568cadba5 100644
+--- a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/test.toml
++++ b/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest/test.toml
+@@ -1,2 +1 @@
+ num_ticks = 2
+-known_failure = true
+diff --git a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest2/test.toml b/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest2/test.toml
+index 342c78968..a49c21d2d 100644
+--- a/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest2/test.toml
++++ b/tests/tests/swfs/from_shumway/as3-loader/LoaderLoadBytesTest2/test.toml
+@@ -1,4 +1,7 @@
+ num_ticks = 2
+ 
+ # FIXME The URL is wrong
++# FlashNX: upstream fixed it (ruffle#24025); FlashNX takes that fix for
++# ActionScript 3 movies only, so that AS2 movies keep their saves where they
++# were, and this 70-byte loadee is not one.
+ known_failure = true
 diff --git a/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/output.ruffle.txt b/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/output.ruffle.txt
 deleted file mode 100644
 index 0cc8869ec..000000000
