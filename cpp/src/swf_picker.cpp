@@ -1039,6 +1039,61 @@ extern "C" int swf_picker_write_file(const char* path, const unsigned char* data
     return 1;
 }
 
+// One extracted file written in pieces, for an entry too big to hold in memory
+// (#130: Happy Wheels' level database is 18 GB in one entry). One at a time.
+// `size` is what the file will hold: from 4 GB on, it is created as a
+// concatenation file (a folder with the archive bit, in parts of 4 GB, read
+// and written as one file by the system), as Tinfoil and DBI do for big NSPs,
+// since a FAT32 card holds no single file over 4 GB. Returns 1 on success.
+static FILE* g_stream_file = nullptr;
+static char  g_stream_path[512] = {0};
+alignas(0x1000) static char g_stream_buf[1024 * 1024];
+
+extern "C" int swf_picker_stream_open(const char* path, unsigned long long size) {
+    if (g_stream_file || !path || !*path) return 0;
+    const size_t plen = std::strlen(path);
+    if (plen >= sizeof(g_stream_path)) return 0;
+    std::memcpy(g_stream_path, path, plen + 1);
+    char buf[512];
+    std::memcpy(buf, path, plen + 1);
+    g_known_dir[0] = '\0';
+    make_parents(buf, plen, 0);
+    std::remove(path);
+    if (size >= 0xFFFFFFFFull) {
+        // fopen("wb") then truncates it and it stays a concatenation file.
+        const Result rc = fsdevCreateFile(path, 0, FsCreateOption_BigFile);
+        std::printf("swf_picker_stream_open: big file %s (%llu bytes, 0x%x)\n", path, size, rc);
+    }
+    g_stream_file = std::fopen(path, "wb");
+    if (!g_stream_file) {
+        std::printf("swf_picker_stream_open: fopen(%s) errno=%d\n", path, errno);
+        std::remove(path);
+        return 0;
+    }
+    std::setvbuf(g_stream_file, g_stream_buf, _IOFBF, sizeof(g_stream_buf));
+    return 1;
+}
+
+extern "C" int swf_picker_stream_write(const unsigned char* data, unsigned int len) {
+    if (!g_stream_file) return 0;
+    return std::fwrite(data, 1, len, g_stream_file) == (size_t)len ? 1 : 0;
+}
+
+// `keep` 0 drops what was written (a failed or cancelled extraction).
+extern "C" int swf_picker_stream_close(int keep) {
+    if (!g_stream_file) return 0;
+    const int rc = std::fclose(g_stream_file);
+    g_stream_file = nullptr;
+    if (!keep || rc != 0) {
+        if (keep) {
+            std::printf("swf_picker_stream_close: close failed for %s\n", g_stream_path);
+        }
+        std::remove(g_stream_path);
+        return 0;
+    }
+    return 1;
+}
+
 // Robust sidecar file read for the SidecarNavigator (v1.3.0 fix). Rust's
 // std::fs::read returns ENOENT for some files that DO exist on disk (verified
 // 2026-06-14: C++ re-reads every extracted file fine, but Rust's std::fs reads

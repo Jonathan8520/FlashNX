@@ -4945,6 +4945,9 @@ pub extern "C" fn ruffle_shutdown() {
     // Every save the game queued, its last flushes included, is on the card
     // before anything else (the library, a delete, the app quitting) runs.
     crate::backend::storage::drain_saves();
+    // The level database a game's server ran on (Happy Wheels, #130), closed
+    // with its game: a delete of the game must find it free.
+    crate::backend::hwserver::close();
     // Before the SESSION END marker, so its summary line counts as the game's.
     crate::clock_auto::end_game();
     keymap::GYRO_MODE.store(keymap::GYRO_OFF, core::sync::atomic::Ordering::Relaxed);

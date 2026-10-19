@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod context3d;
 pub mod glyphs;
+pub mod hwserver;
 pub mod log;
 pub mod navigator;
 pub mod render;

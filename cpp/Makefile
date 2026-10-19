@@ -17,8 +17,12 @@ BUILD       := build
 # third_party/libdrm_nouveau: our copy of devkitPro's libdrm_nouveau (MIT), the
 # layer between Mesa and the GPU driver, built in place of -ldrm_nouveau so it
 # can cache buffer objects. See its README.md.
+# third_party/sqlite: the SQLite amalgamation (public domain), compiled through
+# src/sqlite_flashnx.c with its options (its read-only file system is
+# src/sqlite_vfs.c), so it is an include directory and not a source one. See its
+# README.md.
 SOURCES     := src third_party/libdrm_nouveau
-INCLUDES    := include third_party/libdrm_nouveau
+INCLUDES    := include third_party/libdrm_nouveau third_party/sqlite
 
 # User-facing name = "FlashNX" (rebrand 2026-05-26, fully applied at v1.0.0).
 # The repo + Cargo lib name stay `flash-for-switch` (dev-facing, stable); every

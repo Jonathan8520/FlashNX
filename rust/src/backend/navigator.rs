@@ -769,9 +769,16 @@ extern "C" {
     ) -> core::ffi::c_int;
 }
 
+/// The size of a sidecar file, `None` when it is not there.
+fn read_file_size(path: &std::path::Path) -> Option<u64> {
+    let c = std::ffi::CString::new(path.to_str()?).ok()?;
+    let sz = unsafe { swf_picker_file_size(c.as_ptr()) };
+    (sz >= 0).then_some(sz as u64)
+}
+
 /// Read a sidecar file via C++/libnx (reliable on Horizon, unlike std::fs::read).
 /// Returns None if the file is absent or unreadable.
-fn read_sidecar_file(path: &std::path::Path) -> Option<std::vec::Vec<u8>> {
+pub(crate) fn read_sidecar_file(path: &std::path::Path) -> Option<std::vec::Vec<u8>> {
     let s = path.to_str()?;
     let c = std::ffi::CString::new(s).ok()?;
     let sz = unsafe { swf_picker_file_size(c.as_ptr()) };
@@ -813,6 +820,27 @@ impl NavigatorBackend for SidecarNavigator {
                 )));
             }
         };
+        // A game whose server answered from a SQLite database shipped in its
+        // GameZIP (Happy Wheels' `get_level.hw` / `replay.hw`, #130): the same
+        // queries, answered here. Cheap for everything else (a name test).
+        if resolved.path().ends_with(".hw") {
+            let body = request.body().as_ref().map(|(b, _)| b.as_slice());
+            // Where the archive keeps the script, which is where the game asks
+            // for it, or else the same file under another of the site's hosts.
+            let here = self.local_path(&resolved);
+            let script = if read_file_size(&here).is_some() {
+                here
+            } else {
+                self.tail_match_path(&resolved).unwrap_or(here)
+            };
+            if let Some(bytes) = super::hwserver::answer(&script, body) {
+                let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+                    url: resolved.to_string(),
+                    bytes: Some(bytes),
+                });
+                return async_return(Ok(resp));
+            }
+        }
         // NewgroundsAPI v2 gateway (Newgrounds Rumble & co., Ruffle #896): the
         // gateway host is dead offline. Returning a FetchError makes the AS2
         // `connectMovie` fire its failure path ("Could not contact the API

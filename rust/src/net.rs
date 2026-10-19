@@ -27,6 +27,8 @@ extern "C" {
     fn https_last_http_code() -> c_int;
     fn https_download_start(url: *const c_char, out_path: *const c_char) -> c_int;
     fn https_download_start_ex(url: *const c_char, out_path: *const c_char, unpack: c_int) -> c_int;
+    fn https_download_set_unpacked(bytes: u64);
+    fn https_get_range(url: *const c_char, start: u64, len: u64, buf: *mut c_char, cap: c_int) -> c_int;
     fn https_download_space(size: *mut u64, need: *mut u64, free: *mut u64);
     fn flashnx_sd_free_bytes() -> i64;
     fn https_download_tick() -> c_int;
@@ -681,22 +683,63 @@ pub(crate) fn url_encode_path(s: &str) -> std::string::String {
 /// Start an async download. The C++ side sets up a curl multi handle;
 /// subsequent calls to `download_tick` pump it without blocking.
 pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::String> {
-    start_download_with(url, out_path, false)
+    start_download_with(url, out_path, 0)
 }
 
 /// `start_download` for a GameZIP, which is extracted beside itself before it
-/// is deleted: the room checked for is twice its size.
-pub fn start_download_unpacked(url: &str, out_path: &str) -> Result<(), std::string::String> {
-    start_download_with(url, out_path, true)
+/// is deleted: the room checked for is twice its size, or the zip plus
+/// `unpacked` when its central directory was read first. `big`: the zip will
+/// pass 4 GB and is written as a concatenation file (#130, net.cpp).
+pub fn start_download_unpacked(
+    url: &str,
+    out_path: &str,
+    big: bool,
+    unpacked: Option<u64>,
+) -> Result<(), std::string::String> {
+    start_download_with(url, out_path, if big { 3 } else { 1 })?;
+    if let Some(bytes) = unpacked {
+        unsafe { https_download_set_unpacked(bytes) };
+    }
+    Ok(())
 }
 
-fn start_download_with(url: &str, out_path: &str, unpack: bool) -> Result<(), std::string::String> {
+/// `len` bytes of `url` from `start` (an HTTP range), or `None`. A server that
+/// ignores the range is refused at its first byte (net.cpp `https_get_range`)
+/// and the range asked again: only some of the archive's servers do that.
+pub fn get_range(url: &str, start: u64, len: u64) -> Option<std::vec::Vec<u8>> {
+    if len == 0 || len > 16 * 1024 * 1024 {
+        return None;
+    }
+    let url_c = cstr(url);
+    let mut buf = std::vec![0u8; len as usize];
+    for _ in 0..4 {
+        let n = unsafe {
+            https_get_range(
+                url_c.as_ptr() as *const c_char,
+                start,
+                len,
+                buf.as_mut_ptr() as *mut c_char,
+                len as c_int,
+            )
+        };
+        if n >= 0 {
+            buf.truncate(n as usize);
+            return Some(buf);
+        }
+        if n != -3 {
+            return None;
+        }
+    }
+    None
+}
+
+fn start_download_with(url: &str, out_path: &str, flags: c_int) -> Result<(), std::string::String> {
     offline_check()?;
     let url_c = cstr(url);
     let path_c = cstr(out_path);
     let rc = unsafe {
-        if unpack {
-            https_download_start_ex(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char, 1)
+        if flags != 0 {
+            https_download_start_ex(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char, flags)
         } else {
             https_download_start(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char)
         }

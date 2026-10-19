@@ -296,6 +296,73 @@ fn read_at(f: &mut std::fs::File, off: u64, buf: &mut [u8]) -> bool {
     f.seek(SeekFrom::Start(off)).is_ok() && read_full(f, buf)
 }
 
+/// One local file header of a GameZIP. An entry of 4 GB or more says
+/// 0xFFFFFFFF in its 32-bit sizes and keeps the real ones in a ZIP64 extra
+/// field (#130: Happy Wheels' level database, 18 GB in one entry); its header
+/// "MUST include BOTH" sizes there, original first (APPNOTE 4.5.3).
+struct LocalEntry {
+    method: u16,
+    csize: u64,
+    usize: u64,
+    name_off: u64,
+    nlen: u64,
+    data_off: u64,
+}
+
+impl LocalEntry {
+    fn next_off(&self) -> u64 {
+        self.data_off + self.csize
+    }
+}
+
+/// The local header at `off`, or `None` past the last one, on a read error, or
+/// for an entry whose sizes cannot be known from it (a data descriptor, which
+/// Flashpoint's archives do not use, or 0xFFFFFFFF with no ZIP64 field).
+fn read_local_entry(f: &mut std::fs::File, off: u64) -> Option<LocalEntry> {
+    let mut header = [0u8; 30];
+    if !read_at(f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+        return None;
+    }
+    let flags = u16::from_le_bytes([header[6], header[7]]);
+    let method = u16::from_le_bytes([header[8], header[9]]);
+    let csize32 = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
+    let usize32 = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
+    let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
+    let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
+    if flags & 0x0008 != 0 {
+        return None;
+    }
+    let (mut csize, mut usize_) = (csize32 as u64, usize32 as u64);
+    if csize32 == 0xFFFF_FFFF || usize32 == 0xFFFF_FFFF {
+        let mut extra = std::vec![0u8; elen as usize];
+        if !read_at(f, off + 30 + nlen, &mut extra) {
+            return None;
+        }
+        let mut sizes = None;
+        let mut i = 0usize;
+        while i + 4 <= extra.len() {
+            let id = u16::from_le_bytes([extra[i], extra[i + 1]]);
+            let len = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
+            let body = extra.get(i + 4..i + 4 + len)?;
+            if id == 0x0001 && body.len() >= 16 {
+                let u = u64::from_le_bytes(body[0..8].try_into().ok()?);
+                let c = u64::from_le_bytes(body[8..16].try_into().ok()?);
+                sizes = Some((c, u));
+            }
+            i += 4 + len;
+        }
+        (csize, usize_) = sizes?;
+    }
+    Some(LocalEntry {
+        method,
+        csize,
+        usize: usize_,
+        name_off: off + 30,
+        nlen,
+        data_off: off + 30 + nlen + elen,
+    })
+}
+
 /// Strip one pair of surrounding quotes from a Flashpoint `launchCommand`. The
 /// db wraps commands whose URL contains a space in double quotes (e.g.
 /// `"http://i.4cdn.org/f/I'm Dead.swf"`); left in, the trailing `"` sticks to the
@@ -721,31 +788,20 @@ fn resolve_html_launch_entry(
     // embedded (relative) SWF reference against.
     let dir = html_entry.rfind('/').map(|k| &html_entry[..=k]).unwrap_or("");
     let dir_lower = dir.to_ascii_lowercase();
-    let mut header = [0u8; 30];
     let mut name_buf: std::vec::Vec<u8> = std::vec::Vec::new();
     let mut comp: std::vec::Vec<u8> = std::vec::Vec::new();
     let mut off: u64 = 0;
     while off + 30 <= file_len {
-        if !read_at(f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+        // Data descriptor / unreadable sizes: stop (see `read_local_entry`).
+        let Some(e) = read_local_entry(f, off) else {
             break;
-        }
-        let flags = u16::from_le_bytes([header[6], header[7]]);
-        let method = u16::from_le_bytes([header[8], header[9]]);
-        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
-        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
-        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
-        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
-        if flags & 0x0008 != 0 || csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
-            break; // data descriptor / ZIP64: sizes not usable from the local header
-        }
-        let name_off = off + 30;
-        let data_off = name_off + nlen + elen;
-        let next_off = data_off + csize as u64;
+        };
+        let (method, csize, usize_, data_off, next_off) = (e.method, e.csize, e.usize, e.data_off, e.next_off());
         if next_off > file_len {
             break;
         }
-        name_buf.resize(nlen as usize, 0);
-        if !read_at(f, name_off, &mut name_buf) {
+        name_buf.resize(e.nlen as usize, 0);
+        if !read_at(f, e.name_off, &mut name_buf) {
             break;
         }
         let name = std::string::String::from_utf8_lossy(&name_buf).into_owned();
@@ -863,6 +919,104 @@ extern "C" {
     fn swf_picker_write_file(path: *const core::ffi::c_char, data: *const u8, len: u32) -> core::ffi::c_int;
 }
 
+extern "C" {
+    // One file written in pieces (cpp/src/swf_picker.cpp), a concatenation file
+    // from 4 GB on. 1 on success; `keep` 0 removes what was written.
+    fn swf_picker_stream_open(path: *const core::ffi::c_char, size: u64) -> core::ffi::c_int;
+    fn swf_picker_stream_write(data: *const u8, len: u32) -> core::ffi::c_int;
+    fn swf_picker_stream_close(keep: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// Extract entry `e` to `<files_dir>/<rel>` in pieces, never holding it whole:
+/// read a megabyte of the zip, inflate it, write what came out, again. For an
+/// entry over the in-memory cap (#130: 18 GB of SQLite in Happy Wheels).
+/// `on_progress` moves with the bytes read, since one entry can take minutes.
+/// False when the card refused a write or the data did not inflate to the size
+/// the header announced; nothing of the file is left then.
+fn stream_entry(
+    f: &mut std::fs::File,
+    e: &LocalEntry,
+    files_dir: &str,
+    rel: &str,
+    file_len: u64,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> bool {
+    let full = std::format!("{}/{}", files_dir.trim_end_matches('/'), rel);
+    let Ok(c_path) = std::ffi::CString::new(full.clone()) else {
+        return false;
+    };
+    if e.method != 0 && e.method != 8 {
+        net::log(&std::format!("extract: {} uses method {}, skipped\n", full, e.method));
+        return true;
+    }
+    if unsafe { swf_picker_stream_open(c_path.as_ptr(), e.usize) } == 0 {
+        return false;
+    }
+    net::log(&std::format!("extract: {} streamed ({} -> {} bytes)\n", full, e.csize, e.usize));
+    const IN_CHUNK: usize = 1024 * 1024;
+    const OUT_CHUNK: usize = 4 * 1024 * 1024;
+    let mut input = std::vec![0u8; IN_CHUNK];
+    let mut output = std::vec![0u8; OUT_CHUNK];
+    let mut inflater = flate2::Decompress::new(false);
+    let mut read_done: u64 = 0;
+    let mut written: u64 = 0;
+    let mut ok = f.seek(SeekFrom::Start(e.data_off)).is_ok();
+    while ok && read_done < e.csize {
+        let n = (e.csize - read_done).min(IN_CHUNK as u64) as usize;
+        if !read_full(f, &mut input[..n]) {
+            ok = false;
+            break;
+        }
+        read_done += n as u64;
+        on_progress(e.data_off + read_done, file_len);
+        if e.method == 0 {
+            ok = unsafe { swf_picker_stream_write(input.as_ptr(), n as u32) } != 0;
+            written += n as u64;
+            continue;
+        }
+        let mut slice = &input[..n];
+        loop {
+            let before_in = inflater.total_in();
+            let before_out = inflater.total_out();
+            let status = inflater.decompress(slice, &mut output, flate2::FlushDecompress::None);
+            let used = (inflater.total_in() - before_in) as usize;
+            let made = (inflater.total_out() - before_out) as usize;
+            slice = &slice[used..];
+            if made > 0 {
+                if unsafe { swf_picker_stream_write(output.as_ptr(), made as u32) } == 0 {
+                    ok = false;
+                    break;
+                }
+                written += made as u64;
+            }
+            match status {
+                Ok(flate2::Status::StreamEnd) => break,
+                Ok(_) => {
+                    // Room left in the output and nothing taken: this chunk is
+                    // used up, the next one goes on.
+                    if slice.is_empty() && made < OUT_CHUNK {
+                        break;
+                    }
+                    if used == 0 && made == 0 {
+                        ok = false;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    if ok && written != e.usize {
+        net::log(&std::format!("extract: {} inflated to {} bytes, header said {}\n", full, written, e.usize));
+        ok = false;
+    }
+    let closed = unsafe { swf_picker_stream_close(ok as core::ffi::c_int) } != 0;
+    ok && closed
+}
+
 /// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
 /// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
 fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) -> bool {
@@ -963,25 +1117,82 @@ const SPACE_MARGIN: u64 = 8 * 1024 * 1024;
 /// What extracting the archive will write: the unpacked size of every entry,
 /// read from the local headers alone, stopping where the extraction stops.
 fn unpacked_size(f: &mut std::fs::File, file_len: u64) -> u64 {
-    let mut header = [0u8; 30];
     let mut off: u64 = 0;
     let mut total: u64 = 0;
     while off + 30 <= file_len {
-        if !read_at(f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+        let Some(e) = read_local_entry(f, off) else {
             break;
-        }
-        let flags = u16::from_le_bytes([header[6], header[7]]);
-        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
-        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
-        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
-        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
-        if flags & 0x0008 != 0 || csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
-            break;
-        }
-        total += usize_ as u64;
-        off += 30 + nlen + elen + csize as u64;
+        };
+        total += e.usize;
+        off = e.next_off();
     }
     total
+}
+
+/// What a remote GameZIP unpacks to, from its central directory, read with a
+/// few HTTP ranges before the download: the room it needs is then known before
+/// a byte of it lands, instead of twice the zip (#130: 9.2 GB that unpack to
+/// 18 GB). `None` when the server or the archive does not allow it; the
+/// download then checks twice its size, as before.
+pub fn remote_unpacked_size(url: &str, zip_size: u64) -> Option<u64> {
+    const TAIL: u64 = 64 * 1024 + 22;
+    if zip_size < 22 {
+        return None;
+    }
+    let tail_start = zip_size.saturating_sub(TAIL);
+    let tail = net::get_range(url, tail_start, zip_size - tail_start)?;
+    let eocd = tail.windows(4).rposition(|w| w == b"PK\x05\x06")?;
+    let rd16 = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as u64;
+    let rd32 = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as u64;
+    let rd64 = |b: &[u8], i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap_or([0; 8]));
+    let e = tail.get(eocd..eocd + 22)?;
+    let (mut count, mut cd_size, mut cd_off) = (rd16(e, 10), rd32(e, 12), rd32(e, 16));
+    // ZIP64: the locator sits right before the classic record and points at
+    // the ZIP64 one, which holds the real counts and offsets.
+    if eocd >= 20 && &tail[eocd - 20..eocd - 16] == b"PK\x06\x07" {
+        let rec_off = rd64(&tail, eocd - 12);
+        let rec = net::get_range(url, rec_off, 56)?;
+        if rec.len() < 56 || &rec[0..4] != b"PK\x06\x06" {
+            return None;
+        }
+        (count, cd_size, cd_off) = (rd64(&rec, 32), rd64(&rec, 40), rd64(&rec, 48));
+    }
+    if cd_size == 0 || cd_size > 16 * 1024 * 1024 || cd_off.checked_add(cd_size)? > zip_size {
+        return None;
+    }
+    let cd = net::get_range(url, cd_off, cd_size)?;
+    let mut total: u64 = 0;
+    let mut p = 0usize;
+    let mut seen = 0u64;
+    while p + 46 <= cd.len() && &cd[p..p + 4] == b"PK\x01\x02" {
+        let mut usize_ = rd32(&cd, p + 24);
+        let nlen = rd16(&cd, p + 28) as usize;
+        let elen = rd16(&cd, p + 30) as usize;
+        let clen = rd16(&cd, p + 32) as usize;
+        if usize_ == 0xFFFF_FFFF {
+            // In the central directory the ZIP64 field holds only the sizes
+            // that overflowed, original size first.
+            let extra = cd.get(p + 46 + nlen..p + 46 + nlen + elen)?;
+            let mut i = 0usize;
+            while i + 4 <= extra.len() {
+                let id = rd16(extra, i);
+                let len = rd16(extra, i + 2) as usize;
+                if id == 0x0001 && len >= 8 && i + 12 <= extra.len() {
+                    usize_ = rd64(extra, i + 4);
+                }
+                i += 4 + len;
+            }
+        }
+        total = total.saturating_add(usize_);
+        seen += 1;
+        p += 46 + nlen + elen + clen;
+    }
+    if seen != count {
+        net::log(&std::format!("gamezip: central directory lists {} entries, {} read\n", count, seen));
+        return None;
+    }
+    net::log(&std::format!("gamezip: {} entries, {} bytes unpacked (central directory)\n", seen, total));
+    Some(total)
 }
 
 /// `on_progress(consumed, total)` is called once per entry, in bytes of the ZIP
@@ -1041,7 +1252,7 @@ pub fn extract_gamezip_tree(
     // Cap a single entry's buffers so one pathological record can't OOM the heap.
     // Peak RAM is ~the largest single entry (compressed + inflated), not the whole
     // archive. Matches the large-SWF ceiling.
-    const PER_ENTRY_CAP: u32 = 384 * 1024 * 1024;
+    const PER_ENTRY_CAP: u64 = 384 * 1024 * 1024;
 
     // Fallback used only if the launch entry never shows up: keep the best-ranked
     // `.swf` seen so far (bytes, entry name, rank), not the first one.
@@ -1056,37 +1267,27 @@ pub fn extract_gamezip_tree(
     let mut written = 0usize;
     let mut inflate_fail = 0usize;
 
-    let mut header = [0u8; 30];
     let mut name_buf: std::vec::Vec<u8> = std::vec::Vec::new();
     let mut comp: std::vec::Vec<u8> = std::vec::Vec::new(); // reused; peak = largest entry
     let mut off: u64 = 0;
 
     while off + 30 <= file_len {
         on_progress(off, file_len);
-        if !read_at(&mut f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+        // A data descriptor (sizes after the data) or unreadable sizes: stop.
+        // ZIP64 sizes are read from the entry's extra field (#130).
+        let Some(e) = read_local_entry(&mut f, off) else {
+            let mut sig = [0u8; 4];
+            if read_at(&mut f, off, &mut sig) && &sig == b"PK\x03\x04" {
+                net::log(&std::format!("extract: entry at {} has no usable sizes, stopping\n", off));
+            }
             break;
-        }
-        let flags = u16::from_le_bytes([header[6], header[7]]);
-        let method = u16::from_le_bytes([header[8], header[9]]);
-        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
-        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
-        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
-        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
-        if flags & 0x0008 != 0 {
-            break; // data descriptor: sizes not in the local header
-        }
-        if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
-            net::log("extract: ZIP64 entry (0xFFFFFFFF size) — unsupported, stopping\n");
-            break;
-        }
-        let name_off = off + 30;
-        let data_off = name_off + nlen + elen;
-        let next_off = data_off + csize as u64;
+        };
+        let (method, csize, usize_, data_off, next_off) = (e.method, e.csize, e.usize, e.data_off, e.next_off());
         if next_off > file_len {
             break;
         }
-        name_buf.resize(nlen as usize, 0);
-        if !read_at(&mut f, name_off, &mut name_buf) {
+        name_buf.resize(e.nlen as usize, 0);
+        if !read_at(&mut f, e.name_off, &mut name_buf) {
             break;
         }
         let name = std::string::String::from_utf8_lossy(&name_buf).into_owned();
@@ -1094,6 +1295,23 @@ pub fn extract_gamezip_tree(
         if let Some(rel) = name.strip_prefix("content/").filter(|r| !r.is_empty() && !r.ends_with('/'))
         {
             entries += 1;
+            // Too big to hold in memory, and not a movie FlashNX could play
+            // anyway: written in pieces straight from the zip to the card, as
+            // big as it is (Happy Wheels' 18 GB level database, #130).
+            let is_movie = name.to_ascii_lowercase().ends_with(".swf");
+            if (csize > PER_ENTRY_CAP || usize_ > PER_ENTRY_CAP) && !is_movie {
+                if !stream_entry(&mut f, &e, files_dir, rel, file_len, on_progress) {
+                    net::log(&std::format!(
+                        "extract: {} entries, {} written, stopped at a refused write ({}, {} bytes)\n",
+                        entries, written, name, usize_,
+                    ));
+                    return Err(ExtractFail::Write);
+                }
+                written += 1;
+                crate::sd::commit();
+                off = next_off;
+                continue;
+            }
             if csize > PER_ENTRY_CAP || usize_ > PER_ENTRY_CAP {
                 net::log(&std::format!(
                     "extract: entry {} over per-entry cap ({}->{} bytes), skipped\n",

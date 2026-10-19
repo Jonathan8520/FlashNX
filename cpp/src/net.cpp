@@ -113,6 +113,11 @@ uint64_t  g_dl_start_tick    = 0;   // armGetSystemTick at start, for the speed 
 bool      g_dl_space_checked = false;
 bool      g_dl_no_space      = false;
 bool      g_dl_unpack        = false;
+// What the GameZIP unpacks to, when its central directory was read before the
+// download (`https_download_set_unpacked`): the room checked is then the zip
+// plus that, instead of twice the zip. Happy Wheels' 9.2 GB zip unpacks to
+// 18 GB (#130), which twice its size underestimates by 9 GB.
+uint64_t  g_dl_unpacked_hint = 0;
 uint64_t  g_dl_space_size    = 0;
 uint64_t  g_dl_space_need    = 0;
 uint64_t  g_dl_space_free    = 0;
@@ -146,6 +151,7 @@ void multi_cleanup(bool delete_partial) {
     g_bytes_total = 0;
     g_dl_out_path[0] = 0;
     g_dl_unpack = false;
+    g_dl_unpacked_hint = 0;
 }
 
 int xfer_progress(void* /*ud*/, curl_off_t dltotal, curl_off_t dlnow,
@@ -162,7 +168,10 @@ int xfer_progress(void* /*ud*/, curl_off_t dltotal, curl_off_t dlnow,
             const long long free_bytes = flashnx_sd_free_bytes();
             if (free_bytes >= 0) {
                 const uint64_t left = (uint64_t)(dltotal - dlnow);
-                const uint64_t need = left + (g_dl_unpack ? (uint64_t)dltotal : 0) + SPACE_MARGIN;
+                const uint64_t unpacked = !g_dl_unpack ? 0
+                                        : g_dl_unpacked_hint ? g_dl_unpacked_hint
+                                        : (uint64_t)dltotal;
+                const uint64_t need = left + unpacked + SPACE_MARGIN;
                 if (need > (uint64_t)free_bytes) {
                     g_dl_no_space = true;
                     g_dl_space_size = (uint64_t)dltotal;
@@ -368,13 +377,26 @@ extern "C" int https_last_http_code(void) { return (int)g_last_http_code; }
 //   -1 on curl init failure
 //   -4 on fopen(out_path) failure
 //   -5 if a download is already in flight
-// `unpack`: the file is a GameZIP that will be extracted beside itself, so the
-// room checked for is twice its size (see `g_dl_unpack`).
+// `unpack` bit 0: the file is a GameZIP that will be extracted beside itself,
+// so the room checked for is twice its size (see `g_dl_unpack`), or the zip
+// plus `https_download_set_unpacked`. Bit 1: the file will pass 4 GB, so it is
+// created as a concatenation file (a folder with the archive bit, in parts of
+// 4 GB, that the system reads and writes as one file), as Tinfoil and DBI do
+// for big NSPs: a FAT32 card holds no single file over 4 GB (#130).
 extern "C" int https_download_start_ex(const char* url, const char* out_path, int unpack) {
     if (g_multi || g_handle) {
         return -5;
     }
     if (net_init() != 0) return -1;
+    if (unpack & 2) {
+        // fopen("wb") below truncates an existing concatenation file and keeps
+        // it one (fsdev: CreateFile fails as it exists, then SetSize 0). A plain
+        // file left at that path would stay plain, hence the remove first.
+        std::remove(out_path);
+        const Result brc = fsdevCreateFile(out_path, 0, FsCreateOption_BigFile);
+        std::printf("https_download_start: big file %s (0x%x)\n", out_path, brc);
+        std::fflush(stdout);
+    }
     FILE* f = std::fopen(out_path, "wb");
     if (!f) {
         std::printf("https_download_start: fopen(%s) failed\n", out_path);
@@ -432,7 +454,7 @@ extern "C" int https_download_start_ex(const char* url, const char* out_path, in
     g_fwrite_ticks = 0;
     g_dl_space_checked = false;
     g_dl_no_space = false;
-    g_dl_unpack = unpack != 0;
+    g_dl_unpack = (unpack & 1) != 0;
     // Boost the CPU for the download (TLS decrypt + curl can be the limit on the
     // base clock). Reset by multi_cleanup when the transfer ends.
     appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
@@ -443,6 +465,91 @@ extern "C" int https_download_start_ex(const char* url, const char* out_path, in
 
 extern "C" int https_download_start(const char* url, const char* out_path) {
     return https_download_start_ex(url, out_path, 0);
+}
+
+// What the GameZIP being downloaded unpacks to (see `g_dl_unpacked_hint`).
+// Called right after a successful `https_download_start_ex`, before the first
+// tick; the end of the download clears it.
+extern "C" void https_download_set_unpacked(uint64_t bytes) {
+    g_dl_unpacked_hint = bytes;
+}
+
+namespace {
+struct RangeWriter {
+    char* buf;
+    int   cap;
+    int   pos;
+    bool  overflow;
+    bool  partial;   // the server answered 206, so the bytes are the range
+};
+
+size_t write_range(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    RangeWriter* w = (RangeWriter*)userdata;
+    const size_t bytes = size * nmemb;
+    // Some of the archive's servers ignore Range and answer 200 with the whole
+    // file: stop at the first byte of such an answer rather than read gigabytes.
+    if (!w->partial || w->overflow || w->pos + (int)bytes > w->cap) {
+        w->overflow = true;
+        return 0;
+    }
+    std::memcpy(w->buf + w->pos, ptr, bytes);
+    w->pos += (int)bytes;
+    return bytes;
+}
+
+size_t range_header(char* ptr, size_t size, size_t nitems, void* userdata) {
+    RangeWriter* w = (RangeWriter*)userdata;
+    const size_t n = size * nitems;
+    // Each answer of a redirect chain starts with its own status line.
+    if (n >= 12 && std::strncmp(ptr, "HTTP/", 5) == 0) {
+        const char* sp = (const char*)std::memchr(ptr, ' ', n);
+        w->partial = sp && (size_t)(sp - ptr) + 4 <= n && std::strncmp(sp + 1, "206", 3) == 0;
+    }
+    return n;
+}
+} // namespace
+
+// `len` bytes of `url` from byte `start` (HTTP Range), into `buf`. Returns the
+// byte count, or -2 on a transfer error, -3 when the server did not answer
+// 206 (it ignored the range) or sent more than `cap`. Synchronous, for a few
+// small reads before a download (a GameZIP's central directory).
+extern "C" int https_get_range(const char* url, uint64_t start, uint64_t len, char* buf, int cap) {
+    if (net_init() != 0) return -1;
+    if (len == 0 || cap <= 0) return -3;
+    CURL* c = curl_easy_init();
+    if (!c) return -1;
+    char range[64];
+    std::snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)start,
+                  (unsigned long long)(start + len - 1));
+    RangeWriter w = { buf, cap, 0, false, false };
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/" FLASHNX_VERSION " (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_RANGE, range);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, range_header);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &w);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_range);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &w);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+    const CURLcode res = curl_easy_perform(c);
+    long http_code = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    if (w.overflow || http_code != 206) {
+        std::printf("https_get_range %s [%s]: http=%ld overflow=%d\n", url, range, http_code,
+                    (int)w.overflow);
+        std::fflush(stdout);
+        return -3;
+    }
+    if (res != CURLE_OK) {
+        g_last_curl_result = (int)res;
+        g_last_http_code = http_code;
+        return -2;
+    }
+    return w.pos;
 }
 
 // What the last download stopped for lack of room was (its size), needed and

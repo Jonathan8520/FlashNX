@@ -11247,11 +11247,21 @@ fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
     };
     s.import_retry = Some(RetryAction::FpGame { selection, scroll });
     // A GameZIP is extracted beside itself: the room checked once its size is
-    // known is twice that size.
+    // known is twice that size. Over a gigabyte, what it really unpacks to is
+    // read from its central directory first (a few HTTP ranges, a second or
+    // so): Happy Wheels' 9.2 GB unpack to 18 GB (#130), and twice the zip let
+    // it start a half-hour download that could not fit. Over 4 GB the zip is
+    // written as a concatenation file, which a FAT32 card can hold.
+    const BIG_ZIP: u64 = 0xFFFF_FFFF - 256 * 1024 * 1024;
+    let unpacked = if !fp_direct && cand.size > 1024 * 1024 * 1024 {
+        crate::sources::gamezip::remote_unpacked_size(&url, cand.size)
+    } else {
+        None
+    };
     let started = if fp_direct {
         net::start_download(&url, &out_path)
     } else {
-        net::start_download_unpacked(&url, &out_path)
+        net::start_download_unpacked(&url, &out_path, cand.size >= BIG_ZIP, unpacked)
     };
     match started {
         Ok(()) => {
