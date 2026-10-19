@@ -8144,7 +8144,7 @@ fn shelf_snaps(s: &State) -> [ShelfSnap; 2] {
                 .items
                 .iter()
                 .map(|c| {
-                    let name = crate::sources::gamezip::swf_filename(&c.title);
+                    let name = fp_local_name(&s.entries, c);
                     let on_card = s.entries.iter().any(|e| e.basename == name);
                     (c.title.clone(), discover::screenshot_url(&c.id), on_card)
                 })
@@ -11189,6 +11189,56 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
     s.screen = Screen::FpGallery { selection, scroll };
 }
 
+/// The file a Flashpoint game is (or would be) saved under: its title, unless
+/// a game of that title from another Flashpoint id is on the card (two
+/// "Sonny" in the archive, #131). The other one's `.url` (written for bug
+/// reports) holds its GameZIP address, which carries its id; then this one
+/// goes under its title and first studio. No `.url` (an older import, a file
+/// copied by hand): taken as this game, as before.
+fn fp_local_name_uncached(entries: &[Entry], cand: &crate::sources::flashpoint::CatalogEntry) -> std::string::String {
+    let name = crate::sources::gamezip::swf_filename(&cand.title);
+    let Some(e) = entries.iter().find(|e| e.basename == name) else {
+        return name;
+    };
+    let url_path = std::format!("{}.url", e.path);
+    let source = crate::backend::navigator::read_sidecar_file(std::path::Path::new(&url_path)).unwrap_or_default();
+    let source = std::string::String::from_utf8_lossy(&source);
+    if source.trim().is_empty() || cand.id.is_empty() || source.contains(cand.id.as_str()) {
+        return name;
+    }
+    let studio = cand
+        .developer
+        .split([';', '/', ','])
+        .map(str::trim)
+        .find(|d| !d.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| cand.id.chars().take(8).collect());
+    crate::sources::gamezip::swf_filename(&std::format!("{} ({})", cand.title, studio))
+}
+
+/// `fp_local_name_uncached`, kept per Flashpoint id: the results and the
+/// shelves ask it for every tile on every frame, and it may read a file.
+/// Forgotten whenever a game is added or deleted (`fp_local_names_forget`).
+static FP_LOCAL_NAMES: Mutex<Option<std::collections::HashMap<std::string::String, std::string::String>>> =
+    Mutex::new(None);
+
+fn fp_local_name(entries: &[Entry], cand: &crate::sources::flashpoint::CatalogEntry) -> std::string::String {
+    if let Some(name) = FP_LOCAL_NAMES.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&cand.id).cloned())) {
+        return name;
+    }
+    let name = fp_local_name_uncached(entries, cand);
+    if let Ok(mut g) = FP_LOCAL_NAMES.lock() {
+        g.get_or_insert_with(std::collections::HashMap::new).insert(cand.id.clone(), name.clone());
+    }
+    name
+}
+
+fn fp_local_names_forget() {
+    if let Ok(mut g) = FP_LOCAL_NAMES.lock() {
+        *g = None;
+    }
+}
+
 /// A on Flashpoint game `selection` of `cover_candidates`: play it when it is
 /// on the card, else download it. The results page's A, the details window's,
 /// and a shelf tile's, which hands its games over first (`shelf_to_candidates`):
@@ -11199,26 +11249,8 @@ fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
     let Some(cand) = s.cover_candidates.get(selection).cloned() else {
         return;
     };
-    let mut swf_name = crate::sources::gamezip::swf_filename(&cand.title);
-    // Another game of the same title already on the card (two "Sonny" in the
-    // archive, #131): its `.url` names the GameZIP it came from, with that
-    // game's id. Then this one goes under its title and studio, rather than A
-    // playing the other one. No `.url` (an older import): taken as this game.
-    if let Some(e) = s.entries.iter().find(|e| e.basename == swf_name) {
-        let url_path = std::format!("{}.url", e.path);
-        let source = crate::backend::navigator::read_sidecar_file(std::path::Path::new(&url_path)).unwrap_or_default();
-        let source = std::string::String::from_utf8_lossy(&source);
-        if !source.trim().is_empty() && !cand.id.is_empty() && !source.contains(cand.id.as_str()) {
-            let studio = cand
-                .developer
-                .split([';', '/', ','])
-                .map(str::trim)
-                .find(|d| !d.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| cand.id.chars().take(8).collect());
-            swf_name = crate::sources::gamezip::swf_filename(&std::format!("{} ({})", cand.title, studio));
-        }
-    }
+    // Read afresh: what A does must match the card as it is now.
+    let swf_name = fp_local_name_uncached(&s.entries, &cand);
     // Already on the card: A plays it, from here.
     if let Some(abs) = s.entries.iter().position(|e| e.basename == swf_name) {
         let rect = crate::backend::render::import_sel_rect();
@@ -12158,6 +12190,7 @@ fn delete_game(s: &mut State, game_idx: usize) {
     let Some(entry) = s.entries.get(game_idx).cloned() else {
         return;
     };
+    fp_local_names_forget();
     // Does another game share this file name? Asked FIRST, because everything
     // below that touches a name-keyed file has to know.
     let twins = twin_basename_exists(&s.entries, &entry.basename, &entry.path);
@@ -12793,7 +12826,7 @@ fn draw_fp_page(backend: &mut SwitchRenderBackend, selection: usize, scroll: usi
         let installed: std::vec::Vec<bool> = c
             .iter()
             .map(|x| {
-                let name = crate::sources::gamezip::swf_filename(&x.title);
+                let name = fp_local_name(&s.entries, x);
                 s.entries.iter().any(|e| e.basename == name)
             })
             .collect();
@@ -13950,7 +13983,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let pending = s.fp_size_pending;
                 let studio = details_studio(&s, selection).map(|(_, publisher)| publisher);
                 s.cover_candidates.get(selection).map(|c| {
-                    let name = crate::sources::gamezip::swf_filename(&c.title);
+                    let name = fp_local_name(&s.entries, c);
                     (
                         c.title.clone(),
                         c.developer.clone(),
@@ -15052,6 +15085,9 @@ fn on_download_finished(backend: &mut SwitchRenderBackend) {
 /// completion path so re-downloading an existing file refreshes metadata
 /// instead of growing the list.
 fn add_or_replace_path(path: &str) -> bool {
+    // A game of some title is now on the card: the names Flashpoint results
+    // would take may change (`fp_local_name`).
+    fp_local_names_forget();
     // Just-downloaded file → stamp "now" so the "recent" sort floats it to the
     // top until the next full scan reads the real on-disk mtime.
     let now = std::time::SystemTime::now()
