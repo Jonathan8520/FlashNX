@@ -1835,6 +1835,9 @@ pub(crate) struct State {
     /// studio's page and a draw's are titled with a name or a label ("Au
     /// hasard"), which typed as a search found nothing.
     fp_typed: std::string::String,
+    /// The search on the results page already dropped the typed numbers once,
+    /// having found nothing with them (`words_without_numbers`, #131).
+    fp_relaxed: bool,
     /// The Flashpoint results page shows a search that failed (`cover_msg` says
     /// why) rather than one that found nothing.
     fp_error: bool,
@@ -2075,6 +2078,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     fp_sort: (0, false),
     fp_query: std::string::String::new(),
     fp_typed: std::string::String::new(),
+    fp_relaxed: false,
     fp_error: false,
     fp_size_pending: false,
     fp_size_slot: -1,
@@ -8932,6 +8936,7 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     start_fp_query(&url, query, None, origin.map(|row| (row, IMPORTER_SEARCH_ROW)));
     if let Ok(mut s) = LIBRARY.lock() {
         s.fp_typed = query.to_string();
+        s.fp_relaxed = false;
         s.fp_studio_shelf = false;
         s.fp_studio_pub = false;
         s.fp_hunt = 0;
@@ -12833,6 +12838,30 @@ fn poll_fp_search() {
                 Ok(list) => (list, std::string::String::new(), false),
                 Err(e) => (std::vec::Vec::new(), e, true),
             };
+            // Nothing for the words typed: once more without their numbers
+            // (#131, "Sonny 1", "Super Fighters 2"), the page titled with the
+            // words searched then. A search for words only, not a studio or a
+            // draw, and once.
+            if cands.is_empty() && !failed && studio.is_none() && seed.is_none() && !hunting {
+                let retry = LIBRARY.lock().ok().and_then(|s| {
+                    if s.fp_relaxed {
+                        return None;
+                    }
+                    crate::sources::flashpoint::words_without_numbers(&s.fp_typed)
+                        .map(|words| (words, s.fp_content_filter))
+                });
+                if let Some((words, filter)) = retry {
+                    log(&std::format!("library: flashpoint search found nothing, again as \"{}\"\n", words));
+                    let url = crate::sources::gamezip::search_url(&words, filter);
+                    if net::start_get_async(&url).is_ok() {
+                        if let Ok(mut s) = LIBRARY.lock() {
+                            s.fp_relaxed = true;
+                            s.fp_query = words;
+                        }
+                        return;
+                    }
+                }
+            }
             let mut lot = None;
             if let (Some(seed), false) = (seed, failed) {
                 lot = Some(seed.iter().map(|c| c.id.clone()).collect::<std::vec::Vec<_>>());

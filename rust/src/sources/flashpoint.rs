@@ -90,6 +90,25 @@ pub fn query_words(text: &str) -> std::string::String {
         .join(" ")
 }
 
+/// What the player typed without its numbers, for a second try when the search
+/// found nothing (#131): every word must be in the entry, so "Sonny 1" misses
+/// "Sonny" and "Super Fighters 2" misses "Superfighters", a game with no sequel
+/// in the archive. Digits and roman numerals up to X go; `None` when nothing
+/// would go, or nothing would be left.
+pub fn words_without_numbers(text: &str) -> Option<std::string::String> {
+    const ROMAN: [&str; 10] = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"];
+    let words: std::vec::Vec<&str> = text.split_whitespace().collect();
+    let kept: std::vec::Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| {
+            let w = w.trim_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
+            !(w.is_empty() || w.chars().all(|c| c.is_ascii_digit()) || ROMAN.contains(&w.as_str()))
+        })
+        .collect();
+    (!kept.is_empty() && kept.len() < words.len()).then(|| kept.join(" "))
+}
+
 /// The games of the route's answer: `{"total", "pages", "page", "games"}`, or
 /// `{"games"}` for a random pick. `None` when it is not that.
 pub fn api_games(json: &serde_json::Value) -> Option<&std::vec::Vec<serde_json::Value>> {
