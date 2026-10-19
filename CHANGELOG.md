@@ -11,6 +11,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 ### Fixed
 
 - **Closing FlashNX from the HOME Menu no longer loses saves** (#134). HOME, then Close, ended FlashNX on the spot, so a game kept only what it had explicitly asked to store: what Flash Player wrote when a page closed was lost (Mario 63's level editor and coin records, for example), and so was the session's play time. FlashNX now ends the game the way Quit does while the console says the software is closing. This applies when FlashNX runs as an application (the Homebrew Menu opened from a game, or a HOME Menu icon), not from the Album.
+- **Newgrounds games that load their own files** (a level, music, another part of the game) from Newgrounds' servers got the answer FlashNX gives the Newgrounds API instead of the file. Only the API's own requests get that answer now.
 - **Flashpoint searches with a number the title does not have** ("Sonny 1", "Super Fighters 2") found nothing, because every word typed must be in the game's entry. A search that finds nothing now tries again without its numbers, and the page is titled with the words it searched (#131).
 
 ## v2.0.1 (2026-10-18)
