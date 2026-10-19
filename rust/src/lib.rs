@@ -1589,6 +1589,10 @@ pub extern "C" fn ruffle_init() -> c_int {
     // and the base every relative load must resolve against (the navigator).
     let container = container_html_for(&sidecar_dir, &source_label);
 
+    // A Club Penguin minigame that saved through the Club Penguin client:
+    // given one, and its save switched back on (#134, Puffle Launch). Any
+    // other movie is played as it is.
+    let movie_bytes = crate::backend::clubpenguin::prepare(&source_label, &movie_bytes).unwrap_or(movie_bytes);
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(mut movie) => {
             log_str(&std::format!(
