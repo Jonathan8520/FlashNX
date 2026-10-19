@@ -55,6 +55,16 @@ extern "C" {
     fn ruffle_tick_freq() -> u64;
     fn swf_picker_file_size(path: *const c_char) -> i64;
     fn swf_picker_write_file(path: *const c_char, data: *const u8, len: u32) -> c_int;
+    /// Since the last call (sqlite_vfs.c): reads SQLite asked for, reads that
+    /// went to the card, their bytes, their time in microseconds.
+    fn flashnx_sqlite_io_take(out: *mut u64);
+}
+
+/// The database reads since the last call, for a request's log line.
+fn io_taken() -> [u64; 4] {
+    let mut io = [0u64; 4];
+    unsafe { flashnx_sqlite_io_take(io.as_mut_ptr()) };
+    io
 }
 
 const SQLITE_ROW: c_int = 100;
@@ -606,15 +616,25 @@ pub fn answer(script_path: &Path, body: Option<&[u8]>) -> Option<Vec<u8>> {
         }
     }
     let t0 = unsafe { ruffle_tick_now() };
+    io_taken();
     let out = with_db(&db_path, |db| match script {
         "get_level.hw" => get_level(db, dir, &form),
         _ => replay(db, &form),
     })
     .flatten();
     let ms = ms_since(t0);
+    let io = io_taken();
     match &out {
         Some(bytes) => {
-            tracing::info!("hwserver: {script} {action} {:?} -> {} bytes in {ms} ms", form, bytes.len());
+            tracing::info!(
+                "hwserver: {script} {action} {:?} -> {} bytes in {ms} ms (database: {} reads, {} from the card, {} KB in {} ms)",
+                form,
+                bytes.len(),
+                io[0],
+                io[1],
+                io[2] / 1024,
+                io[3] / 1000
+            );
             if let (Some(path), true) = (&cached, ms >= 500) {
                 if let Some(c) = path.to_str().and_then(|s| std::ffi::CString::new(s).ok()) {
                     unsafe { swf_picker_write_file(c.as_ptr(), bytes.as_ptr(), bytes.len() as u32) };
