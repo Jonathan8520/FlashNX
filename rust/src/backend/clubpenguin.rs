@@ -1,32 +1,36 @@
-//! Puffle Launch saves again (#134).
+//! Puffle Launch and DJ3000 save again (#134).
 //!
 //! Club Penguin's minigames saved through the game they ran in: the Club
 //! Penguin client (`_global.getCurrentShell()`) and its connection to the
 //! server (`_global.getCurrentAirtower()`, messages "sgd" to save, "ggd" to
-//! load). Flashpoint's Puffle Launch is the copy Disney's game site served
-//! alone, where neither exists, and that copy even switches its save off on
-//! its second frame (`saveDataOn = false;`, then the load and every save are
-//! skipped). So nothing was ever kept.
+//! load). Flashpoint plays them alone, where neither exists, so nothing was
+//! ever kept. They are the only two of its 110 Club Penguin games that save
+//! that way. Flashpoint's Puffle Launch, the copy Disney's game site served
+//! alone, even switches its save off on its second frame (`saveDataOn =
+//! false;`, then the load and every save are skipped).
 //!
-//! For that game only, the movie is changed as it loads:
+//! For those games only, the movie is changed as it loads:
 //! - the AS2 in `clubpenguin_shell.as` (compiled to `clubpenguin_shell.bin`)
-//!   runs first on frame 1 and answers as the client and the server: a member
-//!   (Puffle Launch saves for members only), and "sgd"/"ggd" kept in a
+//!   runs first on frame 1 and answers as the client and the server do
+//!   (Houdini's answers, the real client's listeners): a member, as both
+//!   games save for members only, and "sgd"/"ggd" kept by slot in a
 //!   SharedObject, so a `.sol` on the card like any other save;
 //! - `saveDataOn = false` becomes `true`, found by reading the frame scripts'
 //!   actions (a push of that name and `false`, then SetVariable), not at a
-//!   fixed place, so both language copies in the GameZIP get it.
+//!   fixed place, so both language copies of Puffle Launch get it.
 //!
-//! Everything else the game asks of the client (music, stamps, furniture) stays
-//! unanswered, as it is today without a client: those calls did nothing.
-//! Only this game: 47 of Flashpoint's 110 Club Penguin games look for the
-//! client, and finding one changes what they do.
+//! Everything else they ask of the client (music, stamps, furniture, the
+//! penguin's colour) stays unanswered, as it is today without a client: those
+//! calls did nothing. Only these games: 47 of Flashpoint's Club Penguin games
+//! look for the client, and finding one changes what they do.
 
 const SHIM: &[u8] = include_bytes!("clubpenguin_shell.bin");
 
 /// The games this applies to, by their movie's address.
 fn is_listed(url: &str) -> bool {
-    url.to_ascii_lowercase().contains("/clp_spl_puz_pufflelaunch/cp_pufflelaunch.swf")
+    let url = url.to_ascii_lowercase();
+    // Puffle Launch (both languages), DJ3000.
+    url.contains("/clp_spl_puz_pufflelaunch/cp_pufflelaunch.swf") || url.contains("/games/mixmaster/choosesong.swf")
 }
 
 /// The movie to play for `url`: `None` to play `swf` as it is.
