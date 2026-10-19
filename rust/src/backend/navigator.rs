@@ -727,7 +727,10 @@ fn is_dead_ad_host(host: &str) -> bool {
 /// (2026-10-09). The service closed in 2014.
 fn is_tracker_host(host: &str) -> bool {
     const TRACKERS: &[&str] = &["mochibot.com", "google-analytics.com"];
-    const LATER: &[&str] = &["playtomic.com", "swfstats.com"];
+    // dlsnetwork.com: Disney's learning analytics (DJ3000 and other Disney
+    // games), a fresh path per call, so the memory of mirror misses never
+    // knew it and its first call froze the game on three mirror hosts.
+    const LATER: &[&str] = &["playtomic.com", "swfstats.com", "dlsnetwork.com"];
     let is = |d: &&str| host == *d || host.ends_with(&std::format!(".{d}"));
     TRACKERS.iter().any(is) || (mirror_guards() && LATER.iter().any(is))
 }
