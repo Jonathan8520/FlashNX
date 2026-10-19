@@ -2592,6 +2592,13 @@ impl BitmapHandleImpl for ReloadableBitmap {}
 struct SlotLink(std::rc::Weak<ReloadSlot>);
 unsafe impl Send for SlotLink {}
 
+/// A cache entry whose filter chain the per-frame budget put off, with its
+/// filters (`submit_frame`). Ruffle's handles and filters are not `Send`;
+/// as `SlotLink`, only the player thread, which owns a game's backend, makes,
+/// runs and drops these.
+struct DeferredFilterChain(BitmapHandle, Vec<Filter>);
+unsafe impl Send for DeferredFilterChain {}
+
 /// Bitmaps packed into a released atlas slot (`Atlas::free_slots`), for the
 /// `evict:` line.
 static SLOTS_REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3606,6 +3613,10 @@ pub struct SwitchRenderBackend {
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
     /// frame, which was the main fps killer in Phase 2.3's first try.
     filter_tex_pool: FilterTexturePool,
+    /// Cache entries whose filter chain the per-frame budget put off, with
+    /// their filters: run on a following frame unless Ruffle sends the entry
+    /// again (`submit_frame`).
+    deferred_filter_chains: Vec<DeferredFilterChain>,
     /// libdrm buffer-object cache counters: the last running totals read, and
     /// this frame's share of them (the two held counts are levels, not deltas).
     boc_prev: [u64; BOC_STATS],
@@ -7708,6 +7719,7 @@ impl SwitchRenderBackend {
             complex_blend_prog,
             blend_window: 0,
             filter_tex_pool: FilterTexturePool::new(),
+            deferred_filter_chains: Vec::new(),
             // Counted from here, not from the process start.
             boc_prev: boc_stats_now(),
             boc_frame: [0; BOC_STATS],
@@ -9027,6 +9039,94 @@ impl SwitchRenderBackend {
             return Some((atlas.texture, b.width, b.height, [b.u0, b.v0, b.u1 - b.u0, b.v1 - b.v0]));
         }
         None
+    }
+
+    /// Steps 2 and 3 of a cache entry (see `submit_frame`): `filters` applied to
+    /// the content already in `dst_tex`, the result left in `dst_tex`.
+    fn run_filter_chain(&mut self, dst_tex: GLuint, w: u32, h: u32, filters: Vec<Filter>) {
+        // Step 2: filter chain using the (now bounded) FilterTexturePool.
+        // The first source is entry.handle.texture itself; each successful
+        // filter writes into a fresh pool temp and the previous owned temp
+        // is released. acquire() can return None (pool/​GL exhaustion guard)
+        // — we break and keep whatever we have, so we never feed a 0 texture
+        // to the shaders (the old crash).
+        let mut current_tex = dst_tex;
+        let mut current_owned: Option<StandaloneTexture> = None;
+        let n_filters = filters.len();
+        for (i, filter) in filters.into_iter().enumerate() {
+            // When the LAST link of the chain is a real Blur, aim it straight
+            // at `entry.handle` instead of one more pool temp. `run_blur_to_temp`
+            // seeds its own temps from the source before anything writes to the
+            // destination, so source and destination are allowed to be the same
+            // texture here — and that deletes both the pool round trip and step
+            // 3's blit below.
+            //
+            // That blit was a full-surface pass: bind, attach, viewport, one
+            // screen-filling quad. Removing it is worth having whichever way
+            // the cost of this loop turns out to break down, since it is one
+            // fewer render-target switch AND one fewer pass in the chain, and
+            // those are the two candidate units (see the `PRIM_RTBIND_CUR`
+            // note). A single-Blur entry goes from 6 passes to 5.
+            //
+            // Blur only. ColorMatrix, and the glow/bevel family which re-read
+            // the source in their final combine pass, would sample and write one
+            // texture within a single pass, which is undefined.
+            //
+            // The strength test mirrors `run_blur_to_temp`'s own bail-out: below
+            // it that function returns None and `apply_blur_raw` falls back to a
+            // source → destination blit, which with both sides equal would be a
+            // self-blit. Upstream's `filters.retain(|f| !f.impotent())` already
+            // drops those, but it runs BEFORE `filter.scale(stage)`, so a stage
+            // that scaled DOWN could still produce one. Cheap to just check.
+            let blur_lands_in_place = i + 1 == n_filters
+                && match &filter {
+                    Filter::BlurFilter(b) => {
+                        b.blur_x.to_f32().min(255.0) > 1.0
+                            || b.blur_y.to_f32().min(255.0) > 1.0
+                    }
+                    _ => false,
+                };
+            if blur_lands_in_place {
+                let ok = self.apply_filter_raw(
+                    current_tex, w, h, (0, 0), (w, h),
+                    dst_tex, (0, 0), &filter,
+                );
+                if ok {
+                    // Result is already in entry.handle: drop any temp we were
+                    // carrying and leave `current_owned` empty so step 3 is a
+                    // no-op. On failure we keep it, and step 3 blits as before.
+                    if let Some(prev) = current_owned.take() {
+                        self.filter_tex_pool.release(prev);
+                    }
+                    current_tex = dst_tex;
+                }
+                continue;
+            }
+            let Some(next) = self.filter_tex_pool.acquire(w, h) else { break };
+            let next_tex = next.texture;
+            let ok = self.apply_filter_raw(
+                current_tex, w, h, (0, 0), (w, h),
+                next_tex, (0, 0), &filter,
+            );
+            if ok {
+                if let Some(prev) = current_owned.take() {
+                    self.filter_tex_pool.release(prev);
+                }
+                current_tex = next_tex;
+                current_owned = Some(next);
+            } else {
+                // Unsupported/failed filter — passthrough, return to pool.
+                self.filter_tex_pool.release(next);
+            }
+        }
+
+        // Step 3: if the chain moved current off entry.handle, blit the
+        // final temp back into entry.handle and return the temp to pool.
+        if let Some(final_owned) = current_owned {
+            let ft = final_owned.texture;
+            self.blit_identity(ft, w, h, (0, 0), (w, h), dst_tex, (0, 0), w, h);
+            self.filter_tex_pool.release(final_owned);
+        }
     }
 
     fn apply_filter_raw(
@@ -15800,8 +15900,8 @@ impl RenderBackend for SwitchRenderBackend {
         // offscreen passes; a menu *transition* can re-filter dozens of
         // animated elements in one frame, spiking render time. Cap how many
         // filter CHAINS we run per frame — entries past the budget keep the
-        // content from step 1 (text/shape) but skip their bevel/glow border for
-        // that frame.
+        // content from step 1 (text/shape) and get their bevel/glow border on a
+        // later frame (`deferred_filter_chains`, below).
         //
         // IMPORTANT: step 1 (render the content into entry.handle) must run for
         // EVERY entry, every frame. `entry.handle` is NOT a persistent cache we
@@ -15831,6 +15931,36 @@ impl RenderBackend for SwitchRenderBackend {
         if loop_scissor_was_on {
             unsafe { glDisable(GL_SCISSOR_TEST) };
         }
+        // The chains the budget put off on an earlier frame. Ruffle renders a
+        // cached bitmap again only when its object changes, so an entry it does
+        // not send again keeps that frame's unfiltered content for good, where
+        // "for that frame" was meant: Happy Wheels tops its level list with a
+        // white rectangle whose filter is a knocked-out inner shadow (only the
+        // shadow shows), and back from a level, its ~50 filtered rows rebuilt in
+        // the same frame, the rectangle came past the budget and the list stayed
+        // white (#130). An entry Ruffle does send again is rendered and filtered
+        // anew by the loop below.
+        let deferred = std::mem::take(&mut self.deferred_filter_chains);
+        if !deferred.is_empty() {
+            let resent: Vec<GLuint> = cache_entries
+                .iter()
+                .filter_map(|e| as_standalone_bitmap(&e.handle).map(|s| s.0.texture))
+                .collect();
+            for DeferredFilterChain(handle, filters) in deferred {
+                let Some(standalone) = as_standalone_bitmap(&handle) else { continue };
+                let (tex, w, h) = (standalone.0.texture, standalone.0.width, standalone.0.height);
+                if resent.contains(&tex) {
+                    continue;
+                }
+                if filter_chains_run >= budget {
+                    self.deferred_filter_chains.push(DeferredFilterChain(handle, filters));
+                    continue;
+                }
+                filter_chains_run += 1;
+                let _chain_timer = PrimTimer::new(&PRIM_FILTCHAIN_CUR);
+                self.run_filter_chain(tex, w, h, filters);
+            }
+        }
         for entry in cache_entries {
             let Some(standalone) = as_standalone_bitmap(&entry.handle) else {
                 self.warn_once(b"cache_entry: non-standalone handle (skipped)\n\0");
@@ -15848,98 +15978,15 @@ impl RenderBackend for SwitchRenderBackend {
             if entry.filters.is_empty() {
                 continue;
             }
-            // Over the per-frame filter budget → leave this entry unfiltered for
-            // this frame: text/shape is still present (step 1), just without the
-            // bevel/glow border this frame.
+            // Over the per-frame filter budget: the content is there (step 1),
+            // the chain waits for a later frame (`deferred_filter_chains`).
             if filter_chains_run >= budget {
+                self.deferred_filter_chains.push(DeferredFilterChain(entry.handle, entry.filters));
                 continue;
             }
             filter_chains_run += 1;
             let _chain_timer = PrimTimer::new(&PRIM_FILTCHAIN_CUR);
-
-            // Step 2: filter chain using the (now bounded) FilterTexturePool.
-            // The first source is entry.handle.texture itself; each successful
-            // filter writes into a fresh pool temp and the previous owned temp
-            // is released. acquire() can return None (pool/​GL exhaustion guard)
-            // — we break and keep whatever we have, so we never feed a 0 texture
-            // to the shaders (the old crash).
-            let mut current_tex = dst_tex;
-            let mut current_owned: Option<StandaloneTexture> = None;
-            let n_filters = entry.filters.len();
-            for (i, filter) in entry.filters.into_iter().enumerate() {
-                // When the LAST link of the chain is a real Blur, aim it straight
-                // at `entry.handle` instead of one more pool temp. `run_blur_to_temp`
-                // seeds its own temps from the source before anything writes to the
-                // destination, so source and destination are allowed to be the same
-                // texture here — and that deletes both the pool round trip and step
-                // 3's blit below.
-                //
-                // That blit was a full-surface pass: bind, attach, viewport, one
-                // screen-filling quad. Removing it is worth having whichever way
-                // the cost of this loop turns out to break down, since it is one
-                // fewer render-target switch AND one fewer pass in the chain, and
-                // those are the two candidate units (see the `PRIM_RTBIND_CUR`
-                // note). A single-Blur entry goes from 6 passes to 5.
-                //
-                // Blur only. ColorMatrix, and the glow/bevel family which re-read
-                // the source in their final combine pass, would sample and write one
-                // texture within a single pass, which is undefined.
-                //
-                // The strength test mirrors `run_blur_to_temp`'s own bail-out: below
-                // it that function returns None and `apply_blur_raw` falls back to a
-                // source → destination blit, which with both sides equal would be a
-                // self-blit. Upstream's `filters.retain(|f| !f.impotent())` already
-                // drops those, but it runs BEFORE `filter.scale(stage)`, so a stage
-                // that scaled DOWN could still produce one. Cheap to just check.
-                let blur_lands_in_place = i + 1 == n_filters
-                    && match &filter {
-                        Filter::BlurFilter(b) => {
-                            b.blur_x.to_f32().min(255.0) > 1.0
-                                || b.blur_y.to_f32().min(255.0) > 1.0
-                        }
-                        _ => false,
-                    };
-                if blur_lands_in_place {
-                    let ok = self.apply_filter_raw(
-                        current_tex, w, h, (0, 0), (w, h),
-                        dst_tex, (0, 0), &filter,
-                    );
-                    if ok {
-                        // Result is already in entry.handle: drop any temp we were
-                        // carrying and leave `current_owned` empty so step 3 is a
-                        // no-op. On failure we keep it, and step 3 blits as before.
-                        if let Some(prev) = current_owned.take() {
-                            self.filter_tex_pool.release(prev);
-                        }
-                        current_tex = dst_tex;
-                    }
-                    continue;
-                }
-                let Some(next) = self.filter_tex_pool.acquire(w, h) else { break };
-                let next_tex = next.texture;
-                let ok = self.apply_filter_raw(
-                    current_tex, w, h, (0, 0), (w, h),
-                    next_tex, (0, 0), &filter,
-                );
-                if ok {
-                    if let Some(prev) = current_owned.take() {
-                        self.filter_tex_pool.release(prev);
-                    }
-                    current_tex = next_tex;
-                    current_owned = Some(next);
-                } else {
-                    // Unsupported/failed filter — passthrough, return to pool.
-                    self.filter_tex_pool.release(next);
-                }
-            }
-
-            // Step 3: if the chain moved current off entry.handle, blit the
-            // final temp back into entry.handle and return the temp to pool.
-            if let Some(final_owned) = current_owned {
-                let ft = final_owned.texture;
-                self.blit_identity(ft, w, h, (0, 0), (w, h), dst_tex, (0, 0), w, h);
-                self.filter_tex_pool.release(final_owned);
-            }
+            self.run_filter_chain(dst_tex, w, h, entry.filters);
         }
         // DIAG: these two accumulate INSIDE submit_frame, i.e. after the
         // snapshot block near the top of this function has already run, so they
