@@ -11199,7 +11199,26 @@ fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
     let Some(cand) = s.cover_candidates.get(selection).cloned() else {
         return;
     };
-    let swf_name = crate::sources::gamezip::swf_filename(&cand.title);
+    let mut swf_name = crate::sources::gamezip::swf_filename(&cand.title);
+    // Another game of the same title already on the card (two "Sonny" in the
+    // archive, #131): its `.url` names the GameZIP it came from, with that
+    // game's id. Then this one goes under its title and studio, rather than A
+    // playing the other one. No `.url` (an older import): taken as this game.
+    if let Some(e) = s.entries.iter().find(|e| e.basename == swf_name) {
+        let url_path = std::format!("{}.url", e.path);
+        let source = crate::backend::navigator::read_sidecar_file(std::path::Path::new(&url_path)).unwrap_or_default();
+        let source = std::string::String::from_utf8_lossy(&source);
+        if !source.trim().is_empty() && !cand.id.is_empty() && !source.contains(cand.id.as_str()) {
+            let studio = cand
+                .developer
+                .split([';', '/', ','])
+                .map(str::trim)
+                .find(|d| !d.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| cand.id.chars().take(8).collect());
+            swf_name = crate::sources::gamezip::swf_filename(&std::format!("{} ({})", cand.title, studio));
+        }
+    }
     // Already on the card: A plays it, from here.
     if let Some(abs) = s.entries.iter().position(|e| e.basename == swf_name) {
         let rect = crate::backend::render::import_sel_rect();

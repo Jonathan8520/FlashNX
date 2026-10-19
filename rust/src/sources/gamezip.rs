@@ -211,12 +211,19 @@ pub fn parse_search(
         if seen_ids.iter().any(|s| s == id) {
             continue;
         }
-        let title_key = title.trim().to_ascii_lowercase();
-        if !title_key.is_empty() && seen_titles.iter().any(|s| *s == title_key) {
+        // Title AND developer: two games can share a title. The archive has
+        // two "Sonny" (Y8's arcade game, Armor Games' RPG), and the title alone
+        // kept the first, so the RPG could not be found at all (#131).
+        let title_key = std::format!(
+            "{}\u{1}{}",
+            title.trim().to_ascii_lowercase(),
+            str_of(g, "developer").trim().to_ascii_lowercase()
+        );
+        if !title.trim().is_empty() && seen_titles.iter().any(|s| *s == title_key) {
             continue;
         }
         seen_ids.push(id.to_string());
-        if !title_key.is_empty() {
+        if !title.trim().is_empty() {
             seen_titles.push(title_key);
         }
         let developer = g
