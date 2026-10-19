@@ -2978,6 +2978,8 @@ fn script_hook(
     use std::sync::atomic::Ordering::Relaxed;
     extern "C" {
         fn flashnx_take_minus_pressed() -> c_int;
+        fn flashnx_applet_ok() -> c_int;
+        fn flashnx_exit_requested() -> c_int;
     }
     const ZERO: core::time::Duration = core::time::Duration::ZERO;
     if FROZEN_REQUEST.load(Relaxed) != 0 {
@@ -2985,6 +2987,29 @@ fn script_hook(
     }
     if elapsed < core::time::Duration::from_millis(500) {
         return (false, ZERO);
+    }
+    // HOME > Close while a frame computes (#134): the loop only reads the
+    // console's messages between frames, and a frame can run for a minute
+    // while the console gives FlashNX 15 s before ending it, saves unwritten.
+    // Read them here, ten times a second at most, and stop the script as the
+    // timeout would, so the loop ends the game properly.
+    if unsafe { flashnx_exit_requested() } != 0 {
+        return (true, ZERO);
+    }
+    {
+        static LAST_POLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = unsafe { ruffle_tick_now() };
+        let tenth = unsafe { ruffle_tick_freq() } / 10;
+        if now.saturating_sub(LAST_POLL.load(Relaxed)) >= tenth {
+            LAST_POLL.store(now, Relaxed);
+            if unsafe { flashnx_applet_ok() } == 0 {
+                log_str(&std::format!(
+                    "applet: closing asked inside a frame computing for {} ms, script stopped\n",
+                    elapsed.as_millis()
+                ));
+                return (true, ZERO);
+            }
+        }
     }
     if unsafe { flashnx_take_minus_pressed() } == 0 {
         return (false, ZERO);
@@ -3011,7 +3036,7 @@ fn script_hook(
             FROZEN_REQUEST.store(outcome, Relaxed);
             (true, held)
         }
-        // HOME > Close: the loop's next appletMainLoop says so too.
+        // HOME > Close: kept by flashnx_main_loop, the loop ends after the frame.
         3 => (true, held),
         _ => (false, held),
     }
@@ -4227,6 +4252,13 @@ pub extern "C" fn ruffle_library_shutdown() {
         }
         *slot = None;
     }
+}
+
+/// The game's play time, when the console closes FlashNX from a game (HOME >
+/// Close, #134): no library will open again to bank it.
+#[no_mangle]
+pub extern "C" fn ruffle_library_bank_playtime() {
+    library::bank_playtime();
 }
 
 /// Reset all per-game state so the next library cycle picks up a fresh

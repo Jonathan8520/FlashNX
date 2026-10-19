@@ -875,8 +875,9 @@ pub(crate) fn set_import_sort(idx: u8, rev: bool) {
 }
 
 /// On return from a game, add its session duration to the running total.
-/// Consumes `LAUNCH_TICK` so each session is banked exactly once.
-fn bank_playtime() {
+/// Consumes `LAUNCH_TICK` so each session is banked exactly once. Also called
+/// when the console closes FlashNX from a game (`ruffle_library_bank_playtime`).
+pub(crate) fn bank_playtime() {
     let start = LAUNCH_TICK.lock().ok().and_then(|mut g| g.take());
     if let (Some(start), Some(base)) = (start, last_played_basename()) {
         let now = unsafe { ruffle_tick_now() };

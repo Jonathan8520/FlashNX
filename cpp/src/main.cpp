@@ -131,9 +131,46 @@ extern "C" uint32_t flashnx_frozen_pad_down(void) {
     return out;
 }
 
+// HOME > Close (#134). Without an exit lock the OS ends an application on the
+// spot: no `ruffle_shutdown`, so the Player is never dropped and Ruffle never
+// writes the SharedObjects a game filled without calling flush() (Flash Player
+// wrote those when the page closed; Mario 63's level editor, its coin records),
+// and the session's play time is lost too. With the lock (see main), the OS
+// sends an exit request instead and waits up to 15 s, showing "closing the
+// software", for the loops below to end and the usual teardown to run.
+//
+// appletMainLoop answers false only once, on the call that receives the
+// request: whoever polls first (the pause opened inside a computing frame, a
+// poll from the script hook) would swallow it and the game loop would go on.
+// So the request is kept here, also from the hook, which libnx calls wherever
+// the message is processed.
+static volatile bool g_exit_requested = false;
+static bool g_exit_locked = false;
+static AppletHookCookie g_exit_hook_cookie;
+
+static void exit_request_hook(AppletHookType type, void* param) {
+    (void)param;
+    if (type == AppletHookType_OnExitRequest && !g_exit_requested) {
+        g_exit_requested = true;
+        ruffle_log_cstr("applet: the console asks FlashNX to close (HOME > Close), "
+                        "ending the game properly first\n");
+    }
+}
+
+static bool flashnx_main_loop(void) {
+    if (!appletMainLoop()) g_exit_requested = true;
+    return !g_exit_requested;
+}
+
 // The applet's messages (HOME, sleep, closing): 0 once FlashNX must exit.
 extern "C" int flashnx_applet_ok(void) {
-    return appletMainLoop() ? 1 : 0;
+    return flashnx_main_loop() ? 1 : 0;
+}
+
+// The same answer without reading the messages: for the script hook, which
+// polls them itself at most ten times a second.
+extern "C" int flashnx_exit_requested(void) {
+    return g_exit_requested ? 1 : 0;
 }
 
 // Sampling profiler (cpp/src/prof.cpp). Inert unless `prof.on` is on the card.
@@ -179,6 +216,7 @@ extern "C" void ruffle_library_render(void);
 extern "C" int  ruffle_library_selected_path(char* out, int cap);
 extern "C" void ruffle_library_shutdown(void);
 extern "C" void ruffle_library_reset(void);
+extern "C" void ruffle_library_bank_playtime(void);
 
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
@@ -1606,7 +1644,7 @@ static void worker_entry(void* arg) {
     // is exactly where a console is left sitting.
     int lib_clock_check = 0;
     while ((lib_active = (ruffle_library_active() != 0))
-           && (applet_ok = appletMainLoop())) {
+           && (applet_ok = flashnx_main_loop())) {
         if (++lib_clock_check >= 30) {
             lib_clock_check = 0;
             flashnx_clocks_reassert();
@@ -1846,8 +1884,8 @@ static void worker_entry(void* arg) {
     // never touched.
     bool touch_wait_lift = false;
     // MENU_QUIT now means "back to library" — controlled by this flag.
-    // appletMainLoop returning false (home button → Close) also exits the
-    // inner loop but with back_to_library=false → full .nro exit.
+    // The console closing FlashNX (HOME > Close, see flashnx_main_loop) also
+    // exits the inner loop but with back_to_library=false → full .nro exit.
     bool back_to_library = false;
 
     // Power mode is applied on the Rust side, from this game's own preference,
@@ -1901,7 +1939,7 @@ static void worker_entry(void* arg) {
     };
 
     minus_watch_start();
-    while (appletMainLoop()) {
+    while (flashnx_main_loop()) {
         const bool p1_single = (flashnx_pad_update(&pad, PAD_FLAG_PLAYER1) & PAD_READ_SINGLE) != 0;
         // In the pause and its pages, a lone Joy-Con's SL and SR are its
         // shoulders, L and R, which the menus page with (the editor's layers,
@@ -3132,10 +3170,13 @@ static void worker_entry(void* arg) {
     // End of game loop. Either:
     //   - back_to_library == true: user picked QUITTER → tear down Ruffle,
     //     reset library/keymap/SWF cache, loop back to library phase.
-    //   - back_to_library == false: appletMainLoop() returned false (home
-    //     button → Close, applet focus loss without resume, etc.) → full
+    //   - back_to_library == false: the console asked FlashNX to close
+    //     (HOME > Close, flashnx_main_loop), or a forwarder's QUITTER → full
     //     .nro exit.
     prof_game_active(0);
+    // Drops the Player, which writes every SharedObject (Ruffle's Drop calls
+    // flush_shared_objects), and waits for the save queue: on HOME > Close too,
+    // now that the exit is locked.
     ruffle_shutdown();
     gyro_stop(); // the sensor is the game's, like the clocks below
     // Leaving a game always puts the clocks back where they were found, so the
@@ -3160,6 +3201,11 @@ static void worker_entry(void* arg) {
         if (forwarder_swf) {
             std::printf("forwarder: game exited → back to HOME\n");
             std::fflush(stdout);
+        }
+        // The library banks a session's play time when it opens again, which
+        // it will not: closed from HOME, the game's time was lost.
+        if (g_exit_requested) {
+            ruffle_library_bank_playtime();
         }
         exit_nro = true;
     }
@@ -3400,6 +3446,23 @@ int main(int argc, char** argv) {
         remember_own_path(argc > 0 ? argv[0] : nullptr);
         remember_self(argc, argv);
     }
+    // HOME > Close ends the game the way Quit does (#134, flashnx_main_loop).
+    // Only where the OS runs us as the application (title takeover, a HOME-menu
+    // tile): that is where it kills the process, and where the lock is the
+    // documented, common case (games saving on close). As an applet (Album)
+    // the lock would hold the HOME button itself.
+    {
+        const AppletType type = appletGetAppletType();
+        if (type == AppletType_Application || type == AppletType_SystemApplication) {
+            appletHook(&g_exit_hook_cookie, exit_request_hook, nullptr);
+            const Result lrc = appletLockExit();
+            g_exit_locked = R_SUCCEEDED(lrc);
+            char line[96];
+            std::snprintf(line, sizeof(line), "boot: exit lock %s (0x%x)\n",
+                          g_exit_locked ? "on, HOME > Close saves first" : "FAILED", lrc);
+            ruffle_log_cstr(line);
+        }
+    }
     std::printf("boot: main() pre-worker done at %.0f ms\n", boot_ms_since(g_boot_t0));
     std::fflush(stdout);
 
@@ -3418,6 +3481,7 @@ int main(int argc, char** argv) {
         std::printf("threadCreate failed: 0x%x\n", rc); std::fflush(stdout);
         romfsExit();
         socketExit();
+        if (g_exit_locked) appletUnlockExit();
         return EXIT_FAILURE;
     }
     prof_boot(&t);
@@ -3464,7 +3528,15 @@ int main(int argc, char** argv) {
     // Except when an update starts FlashNX again: the process does not end
     // then, the tile's forwarder loads the new `.nro` into it the way hbmenu
     // loads a game, and exit mode 1 would end it before that.
-    if ((forwarder_swf || launched_by_tile) && !g_restart_requested) {
+    // And whenever the console asked us to close (HOME > Close): returning to
+    // hbloader would bring hbmenu back up in an application the OS is closing.
+    //
+    // The exit lock goes first: "official software uses UnlockExit immediately
+    // before" Exit (switchbrew), and libnx wants it before main returns.
+    if (g_exit_locked) {
+        appletUnlockExit();
+    }
+    if ((forwarder_swf || launched_by_tile || g_exit_requested) && !g_restart_requested) {
         const AppletType type = appletGetAppletType();
         if (type == AppletType_Application || type == AppletType_SystemApplication) {
             __nx_applet_exit_mode = 1;
