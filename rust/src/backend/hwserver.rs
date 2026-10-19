@@ -336,16 +336,29 @@ fn levels_document(rows: &[Row]) -> Vec<u8> {
     document("lvs", "", &inner)
 }
 
-/// `getSQLWhere`: the upload date filter, and its length in days. The levels
-/// end in 2019, so anything but `anytime` finds nothing today, as on
-/// Flashpoint (its notes suggest changing the system clock).
-fn upload_filter(uploaded: &str) -> (&'static str, f64) {
+/// `getSQLWhere`'s upload date filter, as days. The script counts them back
+/// from now (`julianday() - julianday(dp) < 7`), and the levels end in March
+/// 2019: the level browser opens on "newest, this week" and found nothing
+/// (Flashpoint's notes suggest changing the system clock). Here they count
+/// back from the newest level of the archive, so "this week" is its last
+/// week, as it was when it was captured.
+fn upload_days(uploaded: &str) -> Option<i64> {
     match uploaded {
-        "month" => ("julianday() - julianday(dp) < 30", 30.0),
-        "week" => ("julianday() - julianday(dp) < 7", 7.0),
-        "today" => ("julianday() - julianday(dp) < 1", 1.0),
-        _ => ("", 0.0),
+        "month" => Some(30),
+        "week" => Some(7),
+        "today" => Some(1),
+        _ => None,
     }
+}
+
+/// The first date an upload filter of `days` leaves out, counted back from
+/// the newest level (`dp` is "YYYY-MM-DD", the index starts with it, so both
+/// this and the filter `dp > it` are read straight from the index).
+fn upload_threshold(db: *mut c_void, days: i64) -> Option<String> {
+    let sql = std::format!("SELECT date(max(dp), '-{days} days') FROM levels");
+    let rows = query(db, &sql, &[])?;
+    let v = rows.first()?.first()?.clone()?;
+    Some(String::from_utf8_lossy(&v).into_owned())
 }
 
 /// `getSQLOrder`, on the columns of `levels_index`. The script sorts on
@@ -407,17 +420,6 @@ fn levels_by_id(db: *mut c_void, ids: &[Row]) -> Option<Vec<Row>> {
     rows_by_id(db, "levels", LEVEL_COLS, 0, ids)
 }
 
-/// Whether any level is recent enough for an upload filter of `days`: the
-/// newest date comes from the index at once, where the filter itself reads
-/// every level to find none.
-fn any_level_within(db: *mut c_void, days: f64) -> bool {
-    let rows = query(db, "SELECT julianday() - julianday(max(dp)) FROM levels", &[]).unwrap_or_default();
-    let age = rows
-        .first()
-        .and_then(|r| r.first().cloned().flatten())
-        .and_then(|v| String::from_utf8_lossy(&v).trim().parse::<f64>().ok());
-    age.is_some_and(|a| a < days)
-}
 
 /// The bytes of the first column of the first row, empty when there is none
 /// (PHP echoes `$result[0]['data']` of nothing: an empty answer).
@@ -451,10 +453,8 @@ fn get_level(db: *mut c_void, dir: &Path, form: &[(String, String)]) -> Option<V
         "get_all" | "get_pub_by_user" | "search_by_name" | "search_by_user" => {
             let page = php_int(field(form, "page"));
             let order = level_order(field(form, "sortby"));
-            let (when, days) = upload_filter(field(form, "uploaded"));
-            if !when.is_empty() && !any_level_within(db, days) {
-                return Some(levels_document(&[]));
-            }
+            let threshold = upload_days(field(form, "uploaded")).and_then(|d| upload_threshold(db, d));
+            let when = if threshold.is_some() { "dp > ?" } else { "" };
             let sterm = std::format!("%{}%", field(form, "sterm"));
             let user = php_int(field(form, "user_id"));
             let (cond, param) = match action {
@@ -464,7 +464,11 @@ fn get_level(db: *mut c_void, dir: &Path, form: &[(String, String)]) -> Option<V
                 _ => ("", None),
             };
             let sql = level_ids_sql(&[cond, when], order, page);
-            let params: Vec<Param> = param.into_iter().collect();
+            // In the order of the conditions' placeholders.
+            let mut params: Vec<Param> = param.into_iter().collect();
+            if let Some(t) = &threshold {
+                params.push(Param::Text(t.as_str()));
+            }
             let ids = query(db, &sql, &params)?;
             Some(levels_document(&levels_by_id(db, &ids)?))
         }

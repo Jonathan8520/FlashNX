@@ -4,6 +4,7 @@
 // database is declared immutable: SQLite then asks for no journal and no lock.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -11,20 +12,61 @@
 
 #include "sqlite3.h"
 
+// Read-ahead for a walk through the file: a list or a search reads a whole
+// index of Happy Wheels' database page after page (4 KB each, on consecutive
+// pages), and each read was its own request to the file system: about 80,000
+// of them, 33 s for a search by name (#130). When a read starts where the
+// previous one ended, this much is read at once and the next pages come from
+// memory. A read elsewhere (one level's data) stays a read of its own size.
+#define NX_READ_AHEAD (512 * 1024)
+
 typedef struct NxFile {
     sqlite3_file base;
     FsFile file;
+    unsigned char* ahead;   // NX_READ_AHEAD bytes, made on the first walk
+    s64 ahead_off;          // what `ahead` holds: [ahead_off, ahead_off + ahead_len)
+    u64 ahead_len;
+    s64 last_end;           // where the previous read ended
 } NxFile;
 
 static int nxClose(sqlite3_file* f) {
-    fsFileClose(&((NxFile*)f)->file);
+    NxFile* nf = (NxFile*)f;
+    fsFileClose(&nf->file);
+    free(nf->ahead);
+    nf->ahead = 0;
     return SQLITE_OK;
 }
 
 static int nxRead(sqlite3_file* f, void* buf, int amt, sqlite3_int64 off) {
+    NxFile* nf = (NxFile*)f;
+    const s64 start = (s64)off;
+    const s64 end = start + amt;
+    // Already read ahead.
+    if (nf->ahead && start >= nf->ahead_off && end <= nf->ahead_off + (s64)nf->ahead_len) {
+        memcpy(buf, nf->ahead + (start - nf->ahead_off), (size_t)amt);
+        nf->last_end = end;
+        return SQLITE_OK;
+    }
+    // A walk: this read follows the previous one.
+    if (start == nf->last_end && amt <= NX_READ_AHEAD) {
+        if (!nf->ahead) nf->ahead = (unsigned char*)malloc(NX_READ_AHEAD);
+        if (nf->ahead) {
+            u64 got = 0;
+            const Result rc = fsFileRead(&nf->file, start, nf->ahead, NX_READ_AHEAD, FsReadOption_None, &got);
+            if (R_SUCCEEDED(rc) && got >= (u64)amt) {
+                nf->ahead_off = start;
+                nf->ahead_len = got;
+                memcpy(buf, nf->ahead, (size_t)amt);
+                nf->last_end = end;
+                return SQLITE_OK;
+            }
+            nf->ahead_len = 0;
+        }
+    }
     u64 got = 0;
-    const Result rc = fsFileRead(&((NxFile*)f)->file, (s64)off, buf, (u64)amt, FsReadOption_None, &got);
+    const Result rc = fsFileRead(&nf->file, start, buf, (u64)amt, FsReadOption_None, &got);
     if (R_FAILED(rc)) return SQLITE_IOERR_READ;
+    nf->last_end = end;
     if (got < (u64)amt) {
         // SQLite wants the rest zeroed on a short read (past the end).
         memset((char*)buf + got, 0, (size_t)amt - (size_t)got);
@@ -74,6 +116,10 @@ static int nxOpen(sqlite3_vfs* vfs, const char* name, sqlite3_file* f, int flags
     (void)vfs;
     NxFile* nf = (NxFile*)f;
     nf->base.pMethods = 0;
+    nf->ahead = 0;
+    nf->ahead_off = 0;
+    nf->ahead_len = 0;
+    nf->last_end = -1;
     // Only the database itself: read-only and immutable, it never needs a
     // journal, and temporary storage is in memory (SQLITE_TEMP_STORE 3).
     if (!name || !(flags & SQLITE_OPEN_MAIN_DB) || (flags & (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE))) {
