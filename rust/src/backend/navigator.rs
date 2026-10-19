@@ -855,8 +855,18 @@ impl NavigatorBackend for SidecarNavigator {
         // Echo the requested command from the POST form so any later command
         // (getMedals, postScore, ...) routes to its own success case too. We
         // still never touch the network. Validated hw with Newgrounds Rumble.
-        let is_ng_gateway = resolved.host_str().is_some_and(is_newgrounds_gateway_host)
-            || resolved.path().ends_with("gateway_v2.php");
+        // An API call, not just any file of those hosts: Flashpoint launches
+        // about 12,800 games from `uploads.ungrounded.net`, and a game loading
+        // its own level or music from there got this JSON instead of the file.
+        // The API posts its command (`command_id=` in the form) to the gateway;
+        // `ngads.com` was the API's host and nothing else.
+        let posts_ng_command = request
+            .body()
+            .as_ref()
+            .is_some_and(|(b, _)| String::from_utf8_lossy(b).contains("command_id="));
+        let is_ng_gateway = resolved.path().ends_with("gateway_v2.php")
+            || resolved.host_str().is_some_and(|h| h == "ngads.com" || h.ends_with(".ngads.com"))
+            || (posts_ng_command && resolved.host_str().is_some_and(is_newgrounds_gateway_host));
         if is_ng_gateway {
             let cmd = request
                 .body()
