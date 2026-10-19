@@ -11,10 +11,12 @@
 //! next to the database (`content/swf.totaljerkface.com/`); what follows
 //! mirrors them action by action, and says where it departs from them.
 //!
-//! The lists (the most played, the best rated, a search) scan the whole levels
-//! table: tens of seconds on the console's card, a frame frozen meanwhile. Each
-//! answer is kept in the game's tree (`.flashnx-cache/`), so a list costs that
-//! once; the database never changes.
+//! A list (the most played, the best rated, a search, a level's replays) has
+//! no index that starts with what it filters or sorts on, so it reads a whole
+//! index (the ids first, then the page's rows by id): seconds on the console's
+//! card, a frame frozen meanwhile. The newest and oldest come straight from the
+//! index. Each slow answer is kept in the game's tree (`.flashnx-cache/`), so a
+//! list costs that once; the database never changes.
 
 use core::ffi::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -380,25 +382,29 @@ fn level_ids_sql(conditions: &[&str], order: &str, page: i64) -> String {
     sql
 }
 
-/// The levels `ids` (first column of each row), whole, in that order.
-fn levels_by_id(db: *mut c_void, ids: &[Row]) -> Option<Vec<Row>> {
-    let ids: Vec<i64> = ids
-        .iter()
-        .filter_map(|r| r.first().cloned().flatten())
-        .map(|v| php_int(&String::from_utf8_lossy(&v)))
-        .collect();
+/// The rows of `table` whose ids are `ids` (first column of each), with the
+/// columns `cols`, the id being column `id_col` of those, in the order of `ids`.
+fn rows_by_id(db: *mut c_void, table: &str, cols: &str, id_col: usize, ids: &[Row]) -> Option<Vec<Row>> {
+    let id_of = |r: &Row, col: usize| {
+        r.get(col).cloned().flatten().map(|v| php_int(&String::from_utf8_lossy(&v))).unwrap_or(0)
+    };
+    let ids: Vec<i64> = ids.iter().map(|r| id_of(r, 0)).collect();
     if ids.is_empty() {
         return Some(Vec::new());
     }
     let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
-    let sql = std::format!("SELECT {LEVEL_COLS} FROM levels WHERE id IN ({})", list.join(","));
+    let sql = std::format!("SELECT {cols} FROM {table} WHERE id IN ({})", list.join(","));
     let mut rows = query(db, &sql, &[])?;
-    let pos = |r: &Row| {
-        let id = r.first().cloned().flatten().map(|v| php_int(&String::from_utf8_lossy(&v))).unwrap_or(0);
+    rows.sort_by_key(|r| {
+        let id = id_of(r, id_col);
         ids.iter().position(|&i| i == id).unwrap_or(usize::MAX)
-    };
-    rows.sort_by_key(|r| pos(r));
+    });
     Some(rows)
+}
+
+/// The levels `ids`, whole, in that order.
+fn levels_by_id(db: *mut c_void, ids: &[Row]) -> Option<Vec<Row>> {
+    rows_by_id(db, "levels", LEVEL_COLS, 0, ids)
 }
 
 /// Whether any level is recent enough for an upload filter of `days`: the
@@ -494,19 +500,26 @@ fn replay(db: *mut c_void, form: &[(String, String)]) -> Option<Vec<u8>> {
         "get_all_by_level" => {
             let page_raw = field(form, "page");
             let page = php_int(page_raw);
-            // An unknown order made the script fail; here, the best rated.
+            // On the columns of `replays_index` (ct, dc, li, rg), `dc` for the
+            // script's `date(dc)` as `dp` above. An unknown order made the
+            // script fail; here, the best rated.
             let order = match field(form, "sortby") {
-                "newest" => "date(dc) DESC",
-                "oldest" => "date(dc) ASC",
+                "newest" => "dc DESC",
+                "oldest" => "dc ASC",
                 "completion_time" => "ct ASC",
                 _ => "rg DESC",
             };
             let offset = REPLAYS_PER_PAGE * (page - 1);
             let li = php_int(field(form, "level_id"));
+            // No index starts with the level, so the ids come from the whole
+            // of `replays_index`, which holds li and every order (and the id):
+            // smaller to read than the replays themselves. Then the page's
+            // replays by id, in that order.
             let sql = std::format!(
-                "SELECT {REPLAY_COLS} FROM replays WHERE li = ? ORDER BY {order} LIMIT {REPLAYS_PER_PAGE} OFFSET ?"
+                "SELECT id FROM replays INDEXED BY replays_index WHERE li = ? ORDER BY {order} LIMIT {REPLAYS_PER_PAGE} OFFSET ?"
             );
-            let rows = query(db, &sql, &[Param::Int(li), Param::Int(offset)])?;
+            let ids = query(db, &sql, &[Param::Int(li), Param::Int(offset)])?;
+            let rows = rows_by_id(db, "replays", REPLAY_COLS, 3, &ids)?;
             let mut inner = Vec::new();
             for row in &rows {
                 element(&mut inner, "rp", &REPLAY_ATTRS, row);
