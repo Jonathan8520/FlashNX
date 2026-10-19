@@ -379,6 +379,38 @@ its own actions), decode time, and child-by-name lookups. Compiled out of
 release builds; the Switch dev build prints the hottest actions every 240
 frames. It is what found the cache above.
 
+**`core/src/frame_lifecycle.rs`, `display_object/movie_clip.rs` — a SWFv9
+goto's objects are constructed before the target frame's script (FlashNX
+#133, upstream ruffle#23532, also ruffle#15039).**
+
+Since ruffle#21572 (`28997d3`, in our base), a SWFv9 goto run outside a frame
+script (from a constructor, an event handler) places the target frame's
+objects without constructing them, and the target frame's script then runs
+before any construction pass: `numChildren` counts them, `getChildAt` returns
+null. Raze 2's `Menu` constructor does `menfr.gotoAndStop("Login")`, whose
+frame script calls `Menu(parent).init()`, which reads the children's names:
+#1009 and a loading screen for ever. Flash constructs those objects after the
+goto returns and before that script (outputs generated under Flash in
+`avm2/swf_9_goto_in_construct_frame` and `timeline/swf_9_event_goto_frame_script`).
+
+`run_inner_goto_frame`'s SWFv9 path sets `MovieClipFlags::GOTO_CONSTRUCT_PENDING`;
+`construct_frame` clears it; `run_local_frame_scripts` runs `construct_frame`
+first when the flag is still set and a frame script is really about to run.
+Nothing is constructed inside the goto itself, so what #21572 fixed stays
+fixed (`avm2/swf_9_goto_in_enter_frame` passes). Narrow on purpose: a clip
+with no script on the target frame still constructs at the next pass.
+
+Two new tests (`avm2/swf_9_goto_in_constructor_children` and `_scripted`, the
+repro attached to ruffle#23532); `timeline/swf_9_event_goto_frame_script`
+(Chowder: Bookin' Cook) now passes and loses its `known_failure`. Full suite:
+4069 passed, the 3 failures that were already there (`avm1/movieclip_hittest`,
+`avm2/stage3d_rotating_cube`, `from_avmplus/mops/mops_basics` timing out under
+load), none new. Raze 2 (the Flashpoint copy, which is the unpatched one) run
+headless through the test harness with `AGI.swf` served: `#1009 at
+Menu/init()` before, its menu class started and no script error after. The
+ordering in the new tests' `output.txt` is inferred from those Flash outputs,
+not generated under Flash.
+
 **Super Smash Flash 2, October 2026: memory and speed.** Measured on the
 console over a dozen sessions; the full suite (host build, GNU toolchain)
 passes 4063 tests with the same two known failures after each step. The

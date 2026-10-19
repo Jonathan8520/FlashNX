@@ -8090,7 +8090,7 @@ index c4f4a8880..a5d6b5763 100644
          gc_context: &Mutation<'gc>,
          tag: swf::DefineMorphShape,
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..97cb496c9 100644
+index baa4a03c5..54a62c321 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -8317,7 +8317,21 @@ index baa4a03c5..97cb496c9 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -849,7 +981,9 @@ impl<'gc> MovieClip<'gc> {
+@@ -836,6 +968,13 @@ impl<'gc> MovieClip<'gc> {
+         self.0.last_queued_script_frame.set(frame);
+     }
+ 
++    /// Called by the SWFv9 path of `run_inner_goto_frame`, which does not
++    /// construct the objects the goto placed.
++    pub fn set_goto_construct_pending(self) {
++        self.0
++            .set_flag(MovieClipFlags::GOTO_CONSTRUCT_PENDING, true);
++    }
++
+     pub fn set_programmatically_played(self) {
+         if self.header_frames() > 1 {
+             self.0.set_programmatically_played()
+@@ -849,7 +988,9 @@ impl<'gc> MovieClip<'gc> {
      }
  
      pub fn play(self) {
@@ -8328,7 +8342,7 @@ index baa4a03c5..97cb496c9 100644
      }
  
      pub fn prev_frame(self, context: &mut UpdateContext<'gc>) {
-@@ -913,6 +1047,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +1054,7 @@ impl<'gc> MovieClip<'gc> {
                  // the current frame, the goto is properly queued.
  
                  self.0.queued_goto_frame.set(Some(frame));
@@ -8336,7 +8350,7 @@ index baa4a03c5..97cb496c9 100644
  
                  // If we have a frame script on that frame, add ourselves to the
                  // frame script cleanup queue so that that frame script is
-@@ -1144,6 +1279,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1144,6 +1286,7 @@ impl<'gc> MovieClip<'gc> {
      /// This sets the current frame of this MovieClip to a given number.
      pub fn set_current_frame(self, current_frame: FrameNumber) {
          self.0.current_frame.set(current_frame);
@@ -8344,7 +8358,7 @@ index baa4a03c5..97cb496c9 100644
      }
  
      /// The amount of frames loaded in this movieclip.
-@@ -1486,6 +1622,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1486,6 +1629,7 @@ impl<'gc> MovieClip<'gc> {
              // in the meantime, it should absolutely run again.
              self.set_last_queued_script_frame(None);
          }
@@ -8352,7 +8366,7 @@ index baa4a03c5..97cb496c9 100644
      }
  
      /// Instantiate a given child object on the timeline at a given depth.
-@@ -1626,6 +1763,13 @@ impl<'gc> MovieClip<'gc> {
+@@ -1626,6 +1770,13 @@ impl<'gc> MovieClip<'gc> {
      }
  
      fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
@@ -8366,7 +8380,7 @@ index baa4a03c5..97cb496c9 100644
          if cfg!(feature = "timeline_debug") {
              tracing::debug!(
                  "[{}]: {} from frame {} to frame {}",
-@@ -1665,6 +1809,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1665,6 +1816,8 @@ impl<'gc> MovieClip<'gc> {
              // otherwise AS3 can observe byproducts of the rewinding process.
              self.0.tag_stream_pos.set(0);
              self.0.current_frame.set(0);
@@ -8375,7 +8389,7 @@ index baa4a03c5..97cb496c9 100644
  
              true
          } else {
-@@ -1698,6 +1844,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1698,6 +1851,8 @@ impl<'gc> MovieClip<'gc> {
          let mut reader = data.read_from(frame_pos);
          while self.current_frame() < clamped_frame && !reader.get_ref().is_empty() {
              self.0.increment_current_frame();
@@ -8384,7 +8398,7 @@ index baa4a03c5..97cb496c9 100644
              frame_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
  
              let tag_callback = |reader: &mut _, tag_code, _tag_len| {
-@@ -1720,6 +1868,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1720,6 +1875,8 @@ impl<'gc> MovieClip<'gc> {
                  match action {
                      Action::Place(version) => {
                          index += 1;
@@ -8393,7 +8407,7 @@ index baa4a03c5..97cb496c9 100644
                          self.0.goto_place_object(
                              reader,
                              version,
-@@ -1747,6 +1897,36 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1904,36 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -8430,7 +8444,7 @@ index baa4a03c5..97cb496c9 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -1877,14 +2057,19 @@ impl<'gc> MovieClip<'gc> {
+@@ -1877,14 +2064,19 @@ impl<'gc> MovieClip<'gc> {
              .filter(|params| params.frame >= frame)
              .for_each(|goto| run_goto_command(self, context, goto));
  
@@ -8451,7 +8465,7 @@ index baa4a03c5..97cb496c9 100644
          }
  
          self.assert_expected_tag_end(hit_target_frame);
-@@ -2149,6 +2334,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -2149,6 +2341,7 @@ impl<'gc> MovieClip<'gc> {
          context: &mut UpdateContext<'gc>,
      ) {
          let current_frame = self.current_frame();
@@ -8459,7 +8473,7 @@ index baa4a03c5..97cb496c9 100644
  
          let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
          let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
-@@ -2391,6 +2577,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -2391,6 +2584,8 @@ impl<'gc> MovieClip<'gc> {
      /// This happens if a MovieClip has been unloaded. The state is then changed one
      /// frame after the command to unload the MovieClip has been read.
      fn transform_to_unloaded_state(self, context: &mut UpdateContext<'gc>) {
@@ -8468,7 +8482,7 @@ index baa4a03c5..97cb496c9 100644
          let movie = if let Some(DisplayObject::MovieClip(parent_mc)) = self.parent() {
              let parent_movie = parent_mc.movie();
              let parent_version = parent_movie.version();
-@@ -2403,7 +2591,21 @@ impl<'gc> MovieClip<'gc> {
+@@ -2403,7 +2598,21 @@ impl<'gc> MovieClip<'gc> {
              None
          };
  
@@ -8490,7 +8504,27 @@ index baa4a03c5..97cb496c9 100644
      }
  
      pub fn attach_audio(self, context: &mut UpdateContext<'gc>, netstream: Option<NetStream<'gc>>) {
-@@ -2494,6 +2696,26 @@ impl<'gc> MovieClip<'gc> {
+@@ -2424,6 +2633,19 @@ impl<'gc> MovieClip<'gc> {
+     }
+ 
+     pub fn run_local_frame_scripts(self, context: &mut UpdateContext<'gc>) {
++        // A SWFv9 goto does not construct the frame it lands on (see
++        // `run_inner_goto_frame`): the objects it placed stay on the display
++        // list without an AVM2 object until our next `construct_frame`. When
++        // the goto ran after this clip's construction pass (from a
++        // constructor or an event handler), the frame script of the target
++        // frame comes first. Flash Player constructs those objects before
++        // running it, after the goto has returned (avm2/swf_9_goto_in_construct_frame,
++        // timeline/swf_9_event_goto_frame_script), so the script finds its
++        // children (Raze 2, ruffle#23532; Chowder: Bookin' Cook, ruffle#15039).
++        if self.0.contains_flag(MovieClipFlags::GOTO_CONSTRUCT_PENDING) && self.frame_script_due() {
++            self.construct_frame(context);
++        }
++
+         let avm2_object = self.0.object2.get();
+ 
+         if let Some(avm2_object) = avm2_object
+@@ -2494,10 +2716,42 @@ impl<'gc> MovieClip<'gc> {
          }
      }
  
@@ -8517,7 +8551,23 @@ index baa4a03c5..97cb496c9 100644
      fn check_has_pending_script(self) {
          let has_pending_script = self.has_frame_script(self.0.current_frame.get());
          self.set_has_pending_script(has_pending_script);
-@@ -2519,8 +2741,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+     }
++
++    /// Whether `run_local_frame_scripts` is about to run a frame script.
++    fn frame_script_due(self) -> bool {
++        let frame_id = self.0.queued_script_frame.get();
++        self.0.object2.get().is_some()
++            && self.has_pending_script()
++            && !self
++                .0
++                .contains_flag(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT)
++            && self.last_queued_script_frame() != Some(frame_id)
++            && self.frame_script(frame_id).is_some()
++    }
+ }
+ 
+ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2519,8 +2773,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
  
      fn enter_frame(self, context: &mut UpdateContext<'gc>) {
          let skip_frame = self.base().should_skip_next_enter_frame();
@@ -8532,7 +8582,7 @@ index baa4a03c5..97cb496c9 100644
              if skip_frame {
                  // If we're skipping our current frame, then we want to skip it for our children
                  // as well. This counts as the skipped frame for any children that already
-@@ -2535,10 +2763,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2535,10 +2795,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                  child.base().set_skip_next_enter_frame(true);
              }
              child.enter_frame(context);
@@ -8545,7 +8595,7 @@ index baa4a03c5..97cb496c9 100644
              return;
          }
  
-@@ -2554,6 +2784,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2554,6 +2816,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
              // after tags have executed.
              let data = self.0.shared.get().swf.clone();
              let place_actions = self.unqueue_filtered(|q| q.unqueue_add());
@@ -8553,7 +8603,7 @@ index baa4a03c5..97cb496c9 100644
  
              for (_, tag) in place_actions {
                  let mut reader = data.read_from(tag.tag_start);
-@@ -2566,6 +2797,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2566,11 +2829,26 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      tracing::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
                  }
              }
@@ -8572,7 +8622,15 @@ index baa4a03c5..97cb496c9 100644
          }
      }
  
-@@ -2601,6 +2844,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+     /// Construct objects placed on this frame.
+     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
++        self.0
++            .set_flag(MovieClipFlags::GOTO_CONSTRUCT_PENDING, false);
++
+         // AVM1 code expects to execute in line with timeline instructions, so
+         // it's exempted from frame construction.
+         if self.movie().is_action_script_3()
+@@ -2601,6 +2879,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      .0
                      .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
                  for child in self.iter_render_list() {
@@ -8583,7 +8641,7 @@ index baa4a03c5..97cb496c9 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2882,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,11 +2917,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -8604,7 +8662,7 @@ index baa4a03c5..97cb496c9 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3019,6 +3275,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+@@ -3019,6 +3310,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                              result = None;
                          }
                      }
@@ -8629,7 +8687,7 @@ index baa4a03c5..97cb496c9 100644
                  } else if result.is_none() {
                      if let Some(child) = child.as_interactive() {
                          result = if !child.as_displayobject().movie().is_action_script_3() {
-@@ -3437,14 +3711,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3746,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -8648,7 +8706,7 @@ index baa4a03c5..97cb496c9 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3837,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3872,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -8670,7 +8728,7 @@ index baa4a03c5..97cb496c9 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3868,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3903,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8680,7 +8738,7 @@ index baa4a03c5..97cb496c9 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3892,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3927,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8692,7 +8750,7 @@ index baa4a03c5..97cb496c9 100644
                  width,
                  height,
              }),
-@@ -3842,7 +4123,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +4158,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -8702,7 +8760,7 @@ index baa4a03c5..97cb496c9 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4250,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4285,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -8742,7 +8800,7 @@ index baa4a03c5..97cb496c9 100644
  
          Ok(())
      }
-@@ -4937,7 +5243,7 @@ pub enum QueuedTagAction {
+@@ -4937,7 +5278,7 @@ pub enum QueuedTagAction {
  bitflags! {
      /// Boolean state flags used by `MovieClip`.
      #[derive(Clone, Copy)]
@@ -8751,7 +8809,7 @@ index baa4a03c5..97cb496c9 100644
          /// Whether this `MovieClip` has run its initial frame.
          const INITIALIZED             = 1 << 0;
  
-@@ -4968,6 +5274,12 @@ bitflags! {
+@@ -4968,6 +5309,17 @@ bitflags! {
  
          /// Whether the AVM2 constructor of this `MovieClip` threw an error.
          const AVM2_CONSTRUCTOR_FAILED = 1 << 7;
@@ -8761,6 +8819,11 @@ index baa4a03c5..97cb496c9 100644
 +        /// movie loaded into the clip afterwards brings its events back.
 +        /// While set, the clip gets no enterFrame event (ruffle#19434).
 +        const UNLOADED = 1 << 8;
++
++        /// A SWFv9 goto placed objects on this clip without constructing
++        /// them, and no `construct_frame` has run on it since. See
++        /// `run_local_frame_scripts`.
++        const GOTO_CONSTRUCT_PENDING = 1 << 9;
      }
  }
  
@@ -9366,7 +9429,7 @@ index 000000000..61d84324a
 +    line
 +}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
-index 91bdb52df..a494720c5 100644
+index 91bdb52df..caf29d1b5 100644
 --- a/core/src/frame_lifecycle.rs
 +++ b/core/src/frame_lifecycle.rs
 @@ -18,6 +18,98 @@ use crate::loader::LoadManager;
@@ -9523,16 +9586,20 @@ index 91bdb52df..a494720c5 100644
      run_frame_script_cleanup(context);
  
      *context.frame_phase = FramePhase::Exit;
-@@ -130,6 +252,8 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -130,6 +252,12 @@ pub fn run_inner_goto_frame<'gc>(
          // We skip the next `enter_frame` call, so that we will still run the framescripts
          // queued for our target frame.
          initial_clip.base().set_skip_next_enter_frame(true);
 +        // FlashNX: the next enter_frame must visit it to consume the flag.
 +        crate::display_object::mark_enter_needed(initial_clip.into());
++        // The objects placed by this goto are not constructed here, but they
++        // must be before the frame script of the target frame runs (see
++        // `MovieClip::run_local_frame_scripts`).
++        initial_clip.set_goto_construct_pending();
  
          return;
      }
-@@ -143,18 +267,64 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -143,18 +271,64 @@ pub fn run_inner_goto_frame<'gc>(
  
      // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
  
@@ -9602,7 +9669,7 @@ index 91bdb52df..a494720c5 100644
  
      for child in removed_frame_scripts {
          child.run_frame_scripts(context);
-@@ -168,11 +338,66 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -168,11 +342,66 @@ pub fn run_inner_goto_frame<'gc>(
      // Instead, we do one cleanup at the end of the frame.
      // This performs special handling of clips which became orphaned as
      // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
@@ -11499,6 +11566,320 @@ index 000000000..dbee897f5
 +++ b/tests/tests/swfs/avm2/property_priority_three_level/test.toml
 @@ -0,0 +1 @@
 +num_frames = 1
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt b/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt
+index 7b84f0cc0..84f9724d2 100644
+--- a/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt
+@@ -6,13 +6,13 @@ Before MyContainer.gotoAndStop(2)
+ After MyContainer.gotoAndStop(2)
+ MyOtherChild onFrameConstructed
+ Stopping Test at frame 2
++Calling MyChild super
++Called MyChild super
+ MyContainer framescript 1
++MyChild framescript 0
+ MyContainer enterFrame
+ MyOtherChild onEnterFrame
+-Calling MyChild super
+-Called MyChild super
+ MyContainer frameConstructed
+ Before MyContainer.gotoAndStop(2)
+ After MyContainer.gotoAndStop(2)
+ MyOtherChild onFrameConstructed
+-MyChild framescript 0
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Child.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Child.as
+new file mode 100644
+index 000000000..12aa3b429
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Child.as
+@@ -0,0 +1,14 @@
++package {
++    import flash.display.MovieClip;
++
++    // Linked to the "Child" symbol, which "Page" places on its frame 2. The
++    // trace marks when this object is constructed relative to Page's frame
++    // script: before it on Flash Player, after it on a regressed Ruffle.
++    public class Child extends MovieClip {
++
++        public function Child() {
++            super();
++            trace("Child: ctor (name=" + name + ")");
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Main.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Main.as
+new file mode 100644
+index 000000000..5c66d0828
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Main.as
+@@ -0,0 +1,13 @@
++package {
++    import flash.display.MovieClip;
++
++    // Document class. Frame 1 of the main timeline places the "Menu" symbol
++    // (or, in the "scripted" variant, the "Launcher" symbol).
++    public class Main extends MovieClip {
++
++        public function Main() {
++            super();
++            trace("Main: ctor, numChildren=" + numChildren);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Menu.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Menu.as
+new file mode 100644
+index 000000000..607411652
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Menu.as
+@@ -0,0 +1,21 @@
++package {
++    import flash.display.Sprite;
++
++    // Linked to the "Menu" symbol, whose frame 1 places the "Page" symbol as
++    // `page`. The goto runs from this constructor, i.e. while the frame that
++    // introduced Menu is still being constructed.
++    public class Menu extends Sprite {
++
++        public var page:Page;
++
++        public function Menu() {
++            super();
++            trace("Menu: ctor, stage=" + (stage == null ? "null" : "set")
++                + " parent=" + (parent == null ? "null" : "set")
++                + "; calling page.gotoAndStop(\"target\")");
++            page.gotoAndStop("target");
++            trace("Menu: ctor, goto returned; page.currentFrame=" + page.currentFrame
++                + " page.numChildren=" + page.numChildren);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Page.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Page.as
+new file mode 100644
+index 000000000..1642cf674
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/Page.as
+@@ -0,0 +1,33 @@
++package {
++    import flash.display.DisplayObject;
++    import flash.display.MovieClip;
++
++    // Linked to the "Page" symbol: frame 1 places one child at depth 10,
++    // frame 2 is labelled "target" and places "childA" at depth 1.
++    public class Page extends MovieClip {
++
++        public var childA:Child;
++
++        public function Page() {
++            super();
++            trace("Page: ctor, currentFrame=" + currentFrame + " numChildren=" + numChildren);
++            // The frame 1 entry matters as much as the frame 2 one: registering
++            // a script for the frame the clip is already on marks a script
++            // pending, and a later goto retargets that pending slot at the
++            // frame it lands on. Without it the frame 2 script is deferred to
++            // the next construct pass and the bug does not appear.
++            addFrameScript(0, onFrame1, 1, onTargetFrame);
++        }
++
++        private function onFrame1():void {
++            trace("Page: frame 1 script, numChildren=" + numChildren);
++        }
++
++        private function onTargetFrame():void {
++            trace("Page: frame 2 script, currentFrame=" + currentFrame + " numChildren=" + numChildren);
++            var child:DisplayObject = getChildAt(0);
++            trace("Page: getChildAt(0) is " + (child == null ? "null" : "an object"));
++            trace("REPRO-PASS getChildAt(0).name=" + child.name);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/output.txt b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/output.txt
+new file mode 100644
+index 000000000..9c9d0062a
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/output.txt
+@@ -0,0 +1,7 @@
++Page: ctor, currentFrame=1 numChildren=1
++Menu: ctor, stage=set parent=set; calling page.gotoAndStop("target")
++Menu: ctor, goto returned; page.currentFrame=2 page.numChildren=2
++Child: ctor (name=childA)
++Page: frame 2 script, currentFrame=2 numChildren=2
++Page: getChildAt(0) is an object
++REPRO-PASS getChildAt(0).name=childA
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.swf b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.swf
+new file mode 100644
+index 000000000..4103d0f91
+Binary files /dev/null and b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.swf differ
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.toml b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.toml
+new file mode 100644
+index 000000000..c64cb4c7d
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children/test.toml
+@@ -0,0 +1 @@
++num_frames = 3
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Child.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Child.as
+new file mode 100644
+index 000000000..12aa3b429
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Child.as
+@@ -0,0 +1,14 @@
++package {
++    import flash.display.MovieClip;
++
++    // Linked to the "Child" symbol, which "Page" places on its frame 2. The
++    // trace marks when this object is constructed relative to Page's frame
++    // script: before it on Flash Player, after it on a regressed Ruffle.
++    public class Child extends MovieClip {
++
++        public function Child() {
++            super();
++            trace("Child: ctor (name=" + name + ")");
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Launcher.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Launcher.as
+new file mode 100644
+index 000000000..a0161d2f1
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Launcher.as
+@@ -0,0 +1,27 @@
++package {
++    import flash.display.MovieClip;
++
++    // Only used by the "scripted" variant. Stands in for the point where Raze 2
++    // builds its menu: a frame script that constructs the sprite and adds it to
++    // the display list only once the constructor has returned.
++    public class Launcher extends MovieClip {
++
++        private var built:Boolean = false;
++
++        public function Launcher() {
++            super();
++            addFrameScript(0, onFrame);
++        }
++
++        private function onFrame():void {
++            if (built) {
++                return;
++            }
++            built = true;
++            trace("Launcher: frame script, constructing Menu");
++            var menu:Menu = new Menu();
++            addChild(menu);
++            trace("Launcher: frame script, Menu added to the display list");
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Main.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Main.as
+new file mode 100644
+index 000000000..5c66d0828
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Main.as
+@@ -0,0 +1,13 @@
++package {
++    import flash.display.MovieClip;
++
++    // Document class. Frame 1 of the main timeline places the "Menu" symbol
++    // (or, in the "scripted" variant, the "Launcher" symbol).
++    public class Main extends MovieClip {
++
++        public function Main() {
++            super();
++            trace("Main: ctor, numChildren=" + numChildren);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Menu.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Menu.as
+new file mode 100644
+index 000000000..607411652
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Menu.as
+@@ -0,0 +1,21 @@
++package {
++    import flash.display.Sprite;
++
++    // Linked to the "Menu" symbol, whose frame 1 places the "Page" symbol as
++    // `page`. The goto runs from this constructor, i.e. while the frame that
++    // introduced Menu is still being constructed.
++    public class Menu extends Sprite {
++
++        public var page:Page;
++
++        public function Menu() {
++            super();
++            trace("Menu: ctor, stage=" + (stage == null ? "null" : "set")
++                + " parent=" + (parent == null ? "null" : "set")
++                + "; calling page.gotoAndStop(\"target\")");
++            page.gotoAndStop("target");
++            trace("Menu: ctor, goto returned; page.currentFrame=" + page.currentFrame
++                + " page.numChildren=" + page.numChildren);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Page.as b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Page.as
+new file mode 100644
+index 000000000..1642cf674
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/Page.as
+@@ -0,0 +1,33 @@
++package {
++    import flash.display.DisplayObject;
++    import flash.display.MovieClip;
++
++    // Linked to the "Page" symbol: frame 1 places one child at depth 10,
++    // frame 2 is labelled "target" and places "childA" at depth 1.
++    public class Page extends MovieClip {
++
++        public var childA:Child;
++
++        public function Page() {
++            super();
++            trace("Page: ctor, currentFrame=" + currentFrame + " numChildren=" + numChildren);
++            // The frame 1 entry matters as much as the frame 2 one: registering
++            // a script for the frame the clip is already on marks a script
++            // pending, and a later goto retargets that pending slot at the
++            // frame it lands on. Without it the frame 2 script is deferred to
++            // the next construct pass and the bug does not appear.
++            addFrameScript(0, onFrame1, 1, onTargetFrame);
++        }
++
++        private function onFrame1():void {
++            trace("Page: frame 1 script, numChildren=" + numChildren);
++        }
++
++        private function onTargetFrame():void {
++            trace("Page: frame 2 script, currentFrame=" + currentFrame + " numChildren=" + numChildren);
++            var child:DisplayObject = getChildAt(0);
++            trace("Page: getChildAt(0) is " + (child == null ? "null" : "an object"));
++            trace("REPRO-PASS getChildAt(0).name=" + child.name);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/output.txt b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/output.txt
+new file mode 100644
+index 000000000..2e3d9c82d
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/output.txt
+@@ -0,0 +1,9 @@
++Launcher: frame script, constructing Menu
++Page: ctor, currentFrame=1 numChildren=1
++Menu: ctor, stage=null parent=null; calling page.gotoAndStop("target")
++Menu: ctor, goto returned; page.currentFrame=2 page.numChildren=2
++Launcher: frame script, Menu added to the display list
++Child: ctor (name=childA)
++Page: frame 2 script, currentFrame=2 numChildren=2
++Page: getChildAt(0) is an object
++REPRO-PASS getChildAt(0).name=childA
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.swf b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.swf
+new file mode 100644
+index 000000000..5f6eff732
+Binary files /dev/null and b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.swf differ
+diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.toml b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.toml
+new file mode 100644
+index 000000000..c64cb4c7d
+--- /dev/null
++++ b/tests/tests/swfs/avm2/swf_9_goto_in_constructor_children_scripted/test.toml
+@@ -0,0 +1 @@
++num_frames = 3
 diff --git a/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/output.ruffle.txt b/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/output.ruffle.txt
 deleted file mode 100644
 index 19829ca08..000000000
@@ -11535,4 +11916,22 @@ index 11e963f5a..f4f16330e 100644
 +++ b/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/test.toml
 @@ -1,2 +1 @@
  num_frames = 30
+-known_failure = true
+diff --git a/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/output.ruffle.txt b/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/output.ruffle.txt
+deleted file mode 100644
+index 0cc8869ec..000000000
+--- a/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/output.ruffle.txt
++++ /dev/null
+@@ -1,5 +0,0 @@
+-Main Constructor
+-Main addFrameScript
+-Main added_to_stage
+-Main frame3
+-MyChild Constructor
+diff --git a/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/test.toml b/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/test.toml
+index b394b207f..1e15fdf27 100644
+--- a/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/test.toml
++++ b/tests/tests/swfs/timeline/swf_9_event_goto_frame_script/test.toml
+@@ -1,2 +1 @@
+ num_frames = 5
 -known_failure = true
