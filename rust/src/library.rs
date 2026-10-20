@@ -12697,6 +12697,19 @@ fn maybe_arm_startup_migrations() {
     // gigabytes, until the next GameZIP download overwrites it. Nothing can be
     // downloading yet on the first frame.
     let _ = std::fs::remove_file(std::format!("{}/.fpdl.zip", primary_root()));
+    // And an extraction cut off the same way, the half-written `<game>.files/`
+    // it noted (`extract_gamezip_main`). Only a folder of that name: the note
+    // is FlashNX's own, but a card edited on a PC could hold anything.
+    let marker = extract_marker_path();
+    if let Some(bytes) = crate::sources::gamezip::read_file_bounded(&marker, 4096) {
+        let dir = std::string::String::from_utf8_lossy(&bytes).trim().to_string();
+        if dir.ends_with(".files") && dir.starts_with("sdmc:/") && !dir.contains("/../") {
+            log(&std::format!("library: removing {}, an extraction cut off last time\n", dir));
+            remove_tree(&dir);
+        }
+        let _ = std::fs::remove_file(&marker);
+        crate::sd::commit();
+    }
     let has = |name: &str| {
         crate::sources::gamezip::read_file_bounded(&primary_user_path(name), 4).is_some()
     };
@@ -13166,6 +13179,87 @@ fn show_import_step(backend: &mut SwitchRenderBackend, phase: ImportPhase, frac:
     unsafe { gl_context_swap() };
 }
 
+extern "C" {
+    fn flashnx_frozen_pad_reset();
+    fn flashnx_frozen_pad_down() -> u32;
+    fn flashnx_applet_ok() -> core::ffi::c_int;
+    fn swf_picker_remove_dir(path: *const core::ffi::c_char) -> core::ffi::c_int;
+}
+
+/// Delete the folder `dir` and everything in it: into FlashNX's trash, emptied
+/// in the background, or in place (swf_picker.cpp). `std::fs::remove_dir_all`
+/// does nothing on the card: the folders an import was meant to wipe stayed.
+/// True when it is no longer there.
+fn remove_tree(dir: &str) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir) else { return false };
+    unsafe { swf_picker_remove_dir(c.as_ptr()) != 0 }
+}
+
+/// Where an extraction is written, noted on the card while it runs
+/// (`extract_gamezip_main`): a power-off or a crash meanwhile left a
+/// half-written `<game>.files/` the library never shows, up to 18 GB for
+/// Happy Wheels. The next start removes it (`maybe_arm_startup_migrations`).
+fn extract_marker_path() -> std::string::String {
+    std::format!("{}/.fpdl.extracting", primary_root())
+}
+
+/// The stop question over the extraction page, while the extraction waits
+/// (it runs inside this frame). The download's question: what was received is
+/// lost, the whole archive here. True to carry on, false to stop; false too
+/// when the console closes FlashNX meanwhile. Returns once A, B and `-` are let
+/// go, so the press that answered does not reach the next page.
+fn confirm_extract_stop(backend: &mut SwitchRenderBackend, frac: Option<f32>, detail: &str, zip_size: u64) -> bool {
+    use crate::backend::render::{Choice, Icon};
+    use crate::sfx::{play, Sfx};
+    let u = crate::loc_ui::ui();
+    let body = u.imp_stop_body.replacen("{}", &crate::backend::render::imp_amount(zip_size), 1);
+    let mut sel = 0usize;
+    play(Sfx::Open);
+    let keep_going = loop {
+        if unsafe { flashnx_applet_ok() } == 0 {
+            break false;
+        }
+        let b = unsafe { flashnx_frozen_pad_down() };
+        if b & (64 | 128) != 0 {
+            sel = 1 - sel;
+            play(Sfx::Move);
+        }
+        if b & 1 != 0 {
+            play(if sel == 1 { Sfx::Decide } else { Sfx::Close });
+            break sel == 0;
+        }
+        if b & (2 | 4) != 0 {
+            play(Sfx::Close);
+            break true;
+        }
+        draw_import_page(backend, ImportPhase::Extract, frac, detail, true);
+        backend.set_ui_modal_scale(1.0);
+        backend.draw_confirm(
+            Icon::Download,
+            u.imp_stop_title,
+            &body,
+            None,
+            &[
+                Choice { label: u.imp_keep_going, destructive: false },
+                Choice { label: u.imp_stop, destructive: true },
+            ],
+            sel,
+            true,
+            u.imp_keep_going,
+        );
+        unsafe { gl_context_swap() };
+    };
+    // At most two seconds.
+    for _ in 0..120 {
+        if unsafe { flashnx_frozen_pad_down() } & (32 | 256) == 0 {
+            break;
+        }
+        draw_import_page(backend, ImportPhase::Extract, frac, detail, true);
+        unsafe { gl_context_swap() };
+    }
+    keep_going
+}
+
 /// Pump the download in flight one frame and draw where it stands: the main
 /// transfer, then the game's other files. `tick` false only draws (its stop
 /// question is closing).
@@ -13254,8 +13348,7 @@ fn fp_try_original_after_mirror_miss(s: &mut State) -> bool {
     match net::start_download(&original, &s.download_out_path) {
         Ok(()) => {
             log(&std::format!(
-                "library: {} is not on Flashpoint's mirror (404), asking the game's own address {}
-",
+                "library: {} is not on Flashpoint's mirror (404), asking the game's own address {}\n",
                 s.download_source_url, original
             ));
             s.download_source_url = original;
@@ -13274,7 +13367,7 @@ fn abort_import_for_card(msg: &str) {
         let files_dir = crate::sidecar_dir_for(Some(&swf_path)).to_string_lossy().into_owned();
         log(&std::format!("library: card full during {}'s files -> removing it\n", swf_path));
         let _ = std::fs::remove_file(&swf_path);
-        let _ = std::fs::remove_dir_all(&files_dir);
+        remove_tree(&files_dir);
         crate::sd::commit();
     }
     let name = s
@@ -14404,7 +14497,7 @@ fn extract_gamezip_main(
     swf_path: &str,
     launch_command: &str,
     backend: &mut SwitchRenderBackend,
-) -> Result<(std::string::String, std::vec::Vec<u8>), std::string::String> {
+) -> Result<(std::string::String, std::vec::Vec<u8>), Option<std::string::String>> {
     // No whole-archive read: `extract_gamezip_tree` now STREAMS the ZIP straight
     // off the SD card, one entry at a time (see its docs), so a multi-GB GameZIP
     // (Super Smash Flash 2 ~3.4 GB) extracts within the ~3.2 GB heap instead of
@@ -14432,12 +14525,23 @@ fn extract_gamezip_main(
     let freq = unsafe { ruffle_tick_freq() };
     let period = if freq == 0 { u64::MAX } else { freq / 10 };
     let mut last_draw: u64 = 0;
-    let mut draw_progress = |done: u64, total: u64| {
+    // It can be stopped: B, with the download's question (everything received
+    // is lost), or the console closing FlashNX (HOME > Close), which the frame
+    // loop cannot hear while this holds it: the console then cut FlashNX off
+    // after 15 s with half a game on the card. The buttons are read on every
+    // call, the console's messages with the drawing, ten times a second.
+    unsafe { flashnx_frozen_pad_reset() };
+    let mut draw_progress = |done: u64, total: u64| -> bool {
+        let stop_asked = unsafe { flashnx_frozen_pad_down() } & 2 != 0;
         let now = unsafe { ruffle_tick_now() };
-        if now.saturating_sub(last_draw) < period {
-            return;
+        if !stop_asked && now.saturating_sub(last_draw) < period {
+            return true;
         }
         last_draw = now;
+        if unsafe { flashnx_applet_ok() } == 0 {
+            log("library: FlashNX is closing, extraction stopped\n");
+            return false;
+        }
         // The import page, its extraction step active: one page for the whole
         // import, where this used to borrow the library mover's screen, titled
         // with the games folder's path.
@@ -14455,36 +14559,53 @@ fn extract_gamezip_main(
         } else {
             std::string::String::new()
         };
-        show_import_step(backend, ImportPhase::Extract, frac, &detail);
+        if stop_asked && !confirm_extract_stop(backend, frac, &detail, total) {
+            log("library: extraction stopped by the player\n");
+            return false;
+        }
+        draw_import_page(backend, ImportPhase::Extract, frac, &detail, true);
+        unsafe { gl_context_swap() };
+        true
     };
-    let (swf, entry_name) =
-        match crate::sources::gamezip::extract_gamezip_tree(
-            zip_path,
-            &files_dir,
-            launch_command,
-            &mut draw_progress,
-        ) {
-            Ok(v) => v,
-            Err(why) => {
-                // No game produced. Wipe the partial tree so a failed multi-GB
-                // extraction doesn't strand gigabytes on the SD card.
-                use crate::sources::gamezip::ExtractFail;
-                let _ = std::fs::remove_dir_all(&files_dir);
-                return Err(match why {
-                    ExtractFail::NoSwf => crate::loc_ui::ui().imp_err_fp_no_swf.to_string(),
-                    ExtractFail::NoSpace(size, need, free) => crate::loc::err_sd_space(size, need, free),
-                    ExtractFail::Write => crate::loc::s().err_sd_write.to_string(),
-                });
-            }
-        };
+    let marker = extract_marker_path();
+    if let Ok(c) = std::ffi::CString::new(marker.clone()) {
+        unsafe { swf_picker_write_file(c.as_ptr(), files_dir.as_ptr(), files_dir.len() as u32) };
+        crate::sd::commit();
+    }
+    let extracted = crate::sources::gamezip::extract_gamezip_tree(zip_path, &files_dir, launch_command, &mut draw_progress);
+    let (swf, entry_name) = match extracted {
+        Ok(v) => v,
+        Err(why) => {
+            // No game produced. Wipe the partial tree so a failed multi-GB
+            // extraction doesn't strand gigabytes on the SD card.
+            use crate::sources::gamezip::ExtractFail;
+            let removed = remove_tree(&files_dir);
+            let _ = std::fs::remove_file(&marker);
+            crate::sd::commit();
+            log(&std::format!(
+                "library: extraction not finished, {} {}\n",
+                files_dir,
+                if removed { "removed" } else { "NOT removed" }
+            ));
+            return Err(match why {
+                ExtractFail::Cancelled => None,
+                ExtractFail::NoSwf => Some(crate::loc_ui::ui().imp_err_fp_no_swf.to_string()),
+                ExtractFail::NoSpace(size, need, free) => Some(crate::loc::err_sd_space(size, need, free)),
+                ExtractFail::Write => Some(crate::loc::s().err_sd_write.to_string()),
+            });
+        }
+    };
     if std::fs::write(swf_path, &swf).is_err() {
         // The tree is no use without its game, and the card that refused this
         // write is the one it fills.
         log("library: gamezip .swf write failed\n");
         let _ = std::fs::remove_file(swf_path);
-        let _ = std::fs::remove_dir_all(&files_dir);
-        return Err(crate::loc::s().err_sd_write.to_string());
+        remove_tree(&files_dir);
+        let _ = std::fs::remove_file(&marker);
+        return Err(Some(crate::loc::s().err_sd_write.to_string()));
     }
+    // The game is on the card: nothing for the next start to remove.
+    let _ = std::fs::remove_file(&marker);
     crate::sd::commit();
     log(&std::format!(
         "library: gamezip extracted -> {} ({} bytes); full tree -> {}\n",
@@ -14857,10 +14978,18 @@ fn on_download_finished(backend: &mut SwitchRenderBackend) {
             Ok(v) => v,
             Err(msg) => {
                 let _ = std::fs::remove_file(&out_path);
+                crate::sd::commit();
                 if let Ok(mut s) = LIBRARY.lock() {
-                    let name = s.download_title.clone().unwrap_or_else(|| pretty_name(&file_name));
-                    import_error(&mut s, ErrKind::Download, &msg, false, &name);
-                    clear_download_state(&mut s);
+                    match msg {
+                        // Stopped (B, or FlashNX closing): back to the list it
+                        // came from, as a stopped download.
+                        None => stop_download(&mut s),
+                        Some(msg) => {
+                            let name = s.download_title.clone().unwrap_or_else(|| pretty_name(&file_name));
+                            import_error(&mut s, ErrKind::Download, &msg, false, &name);
+                            clear_download_state(&mut s);
+                        }
+                    }
                 }
                 return;
             }

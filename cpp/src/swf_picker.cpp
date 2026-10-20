@@ -587,6 +587,27 @@ static int sweep_basename(const char* dir, const char* basename, size_t blen,
     return removed;
 }
 
+// A folder to delete whole: a game's `.files/` an extraction did not finish
+// (library.rs). Rust's remove_dir_all does not work on Horizon (it walks the
+// tree with calls the card does not offer): the unfinished extraction stayed.
+// Into the trash at once, as a deleted game's; deleted in place when it
+// cannot go there. 1 when it is gone from where it was, or was not there.
+extern "C" int swf_picker_remove_dir(const char* path) {
+    if (!path || !*path) return 0;
+    DIR* d = opendir(path);
+    if (!d) return 1;
+    closedir(d);
+    if (!trash_move(path)) {
+        const int n = remove_dir_recursive(path);
+        std::printf("swf_picker_remove_dir: removed %s in place (%d entries)\n", path, n);
+        std::fflush(stdout);
+    }
+    DIR* again = opendir(path);
+    if (!again) return 1;
+    closedir(again);
+    return 0;
+}
+
 extern "C" int swf_picker_delete_game(const char* swf_path, const char* also_dir) {
     if (!swf_path || !*swf_path) return -1;
     const char* slash = std::strrchr(swf_path, '/');

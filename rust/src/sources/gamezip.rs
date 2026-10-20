@@ -937,27 +937,28 @@ extern "C" {
 /// Extract entry `e` to `<files_dir>/<rel>` in pieces, never holding it whole:
 /// read a megabyte of the zip, inflate it, write what came out, again. For an
 /// entry over the in-memory cap (#130: 18 GB of SQLite in Happy Wheels).
-/// `on_progress` moves with the bytes read, since one entry can take minutes.
-/// False when the card refused a write or the data did not inflate to the size
-/// the header announced; nothing of the file is left then.
+/// `on_progress` moves with the bytes read, since one entry can take minutes,
+/// and stops it when it answers false (`Cancelled`). `Write` when the card
+/// refused a write or the data did not inflate to the size the header
+/// announced. Nothing of the file is left after either.
 fn stream_entry(
     f: &mut std::fs::File,
     e: &LocalEntry,
     files_dir: &str,
     rel: &str,
     file_len: u64,
-    on_progress: &mut dyn FnMut(u64, u64),
-) -> bool {
+    on_progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<(), ExtractFail> {
     let full = std::format!("{}/{}", files_dir.trim_end_matches('/'), rel);
     let Ok(c_path) = std::ffi::CString::new(full.clone()) else {
-        return false;
+        return Err(ExtractFail::Write);
     };
     if e.method != 0 && e.method != 8 {
         net::log(&std::format!("extract: {} uses method {}, skipped\n", full, e.method));
-        return true;
+        return Ok(());
     }
     if unsafe { swf_picker_stream_open(c_path.as_ptr(), e.usize) } == 0 {
-        return false;
+        return Err(ExtractFail::Write);
     }
     net::log(&std::format!("extract: {} streamed ({} -> {} bytes)\n", full, e.csize, e.usize));
     const IN_CHUNK: usize = 1024 * 1024;
@@ -967,6 +968,7 @@ fn stream_entry(
     let mut inflater = flate2::Decompress::new(false);
     let mut read_done: u64 = 0;
     let mut written: u64 = 0;
+    let mut cancelled = false;
     let mut ok = f.seek(SeekFrom::Start(e.data_off)).is_ok();
     while ok && read_done < e.csize {
         let n = (e.csize - read_done).min(IN_CHUNK as u64) as usize;
@@ -975,7 +977,11 @@ fn stream_entry(
             break;
         }
         read_done += n as u64;
-        on_progress(e.data_off + read_done, file_len);
+        if !on_progress(e.data_off + read_done, file_len) {
+            cancelled = true;
+            ok = false;
+            break;
+        }
         if e.method == 0 {
             ok = unsafe { swf_picker_stream_write(input.as_ptr(), n as u32) } != 0;
             written += n as u64;
@@ -1021,7 +1027,11 @@ fn stream_entry(
         ok = false;
     }
     let closed = unsafe { swf_picker_stream_close(ok as core::ffi::c_int) } != 0;
-    ok && closed
+    if cancelled {
+        net::log(&std::format!("extract: {} stopped after {} of {} bytes, removed\n", full, written, e.usize));
+        return Err(ExtractFail::Cancelled);
+    }
+    if ok && closed { Ok(()) } else { Err(ExtractFail::Write) }
 }
 
 /// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
@@ -1116,6 +1126,9 @@ pub enum ExtractFail {
     NoSpace(u64, u64, u64),
     /// The card refused a write part-way (full, or write-protected).
     Write,
+    /// `on_progress` answered false: the player stopped it, or the console is
+    /// closing FlashNX. The entry being written is removed.
+    Cancelled,
 }
 
 /// Kept free on top of what an extraction writes (net.cpp `SPACE_MARGIN`).
@@ -1217,7 +1230,7 @@ pub fn extract_gamezip_tree(
     zip_path: &str,
     files_dir: &str,
     launch_command: &str,
-    on_progress: &mut dyn FnMut(u64, u64),
+    on_progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<(std::vec::Vec<u8>, std::string::String), ExtractFail> {
     // STREAMED extraction: walk the GameZIP's local file headers straight off the
     // SD card, holding only ONE entry's bytes in RAM at a time. The whole archive
@@ -1279,7 +1292,10 @@ pub fn extract_gamezip_tree(
     let mut off: u64 = 0;
 
     while off + 30 <= file_len {
-        on_progress(off, file_len);
+        if !on_progress(off, file_len) {
+            net::log(&std::format!("extract: stopped at {} of {} bytes, {} entries written\n", off, file_len, written));
+            return Err(ExtractFail::Cancelled);
+        }
         // A data descriptor (sizes after the data) or unreadable sizes: stop.
         // ZIP64 sizes are read from the entry's extra field (#130).
         let Some(e) = read_local_entry(&mut f, off) else {
@@ -1307,12 +1323,16 @@ pub fn extract_gamezip_tree(
             // big as it is (Happy Wheels' 18 GB level database, #130).
             let is_movie = name.to_ascii_lowercase().ends_with(".swf");
             if (csize > PER_ENTRY_CAP || usize_ > PER_ENTRY_CAP) && !is_movie {
-                if !stream_entry(&mut f, &e, files_dir, rel, file_len, on_progress) {
-                    net::log(&std::format!(
-                        "extract: {} entries, {} written, stopped at a refused write ({}, {} bytes)\n",
-                        entries, written, name, usize_,
-                    ));
-                    return Err(ExtractFail::Write);
+                match stream_entry(&mut f, &e, files_dir, rel, file_len, on_progress) {
+                    Ok(()) => {}
+                    Err(ExtractFail::Cancelled) => return Err(ExtractFail::Cancelled),
+                    Err(why) => {
+                        net::log(&std::format!(
+                            "extract: {} entries, {} written, stopped at a refused write ({}, {} bytes)\n",
+                            entries, written, name, usize_,
+                        ));
+                        return Err(why);
+                    }
                 }
                 written += 1;
                 crate::sd::commit();

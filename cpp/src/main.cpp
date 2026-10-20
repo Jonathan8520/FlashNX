@@ -115,8 +115,10 @@ extern "C" void flashnx_frozen_pad_reset(void) {
     flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_MENU);
 }
 
-// Presses since the last call: 1 A, 2 B, 4 `-`, 8 up, 16 down (d-pad or
-// either stick), 32 `-` or B still held.
+// Presses since the last call: 1 A, 2 B, 4 `-`, 8 up, 16 down, 64 left,
+// 128 right (d-pad or either stick); held: 32 `-` or B, 256 A. The question
+// that stops an extraction (library.rs) answers side by side, and waits for
+// A to be let go so the answer does not reach the next page.
 extern "C" uint32_t flashnx_frozen_pad_down(void) {
     flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_MENU);
     const u64 d = padGetButtonsDown(&s_frozen_pad);
@@ -128,6 +130,9 @@ extern "C" uint32_t flashnx_frozen_pad_down(void) {
     if (d & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) out |= 8;
     if (d & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) out |= 16;
     if (h & (HidNpadButton_Minus | HidNpadButton_B)) out |= 32;
+    if (d & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_StickRLeft)) out |= 64;
+    if (d & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight)) out |= 128;
+    if (h & HidNpadButton_A) out |= 256;
     return out;
 }
 
