@@ -2,7 +2,9 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## Unreleased
+## v2.0.2 (2026-10-21)
+
+FlashNX now installs the full Happy Wheels with all its levels, keeps the progress of more games, and starts games that stopped on their loading screen.
 
 ### Added
 
@@ -17,7 +19,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 - **Closing FlashNX from the HOME Menu no longer loses saves** (#134). HOME, then Close, ended FlashNX on the spot, so a game kept only what it had explicitly asked to store: what Flash Player wrote when a page closed was lost (Mario 63's level editor and coin records, for example), and so was the session's play time. FlashNX now ends the game the way Quit does while the console says the software is closing. This applies when FlashNX runs as an application (the Homebrew Menu opened from a game, or a HOME Menu icon), not from the Album.
 - **Puffle Launch keeps its progress, and Pufflescape its scores** (#134). Puffle Launch saved on Club Penguin's servers, and Flashpoint's copy even turns its save off; nothing was ever kept. FlashNX now plays the part of the Club Penguin client and server for it: what it saves goes to a save on the SD card like any other game's, and comes back at the next launch. Pufflescape never kept anything, even on Club Penguin: the O-berries, rare berry and time of each level were forgotten when it closed. FlashNX now keeps them in a save and puts them back on the level select.
-- **Very long loads are no longer cut off after 15 seconds** (#130). Ruffle stops a script that runs for 15 seconds in one frame, where Flash Player asked whether to. The Switch runs ActionScript several times slower than Flash Player did: the biggest Happy Wheels levels need about 23 seconds to load and stayed on a blue screen. The limit is now 60 seconds, the most a game can ask Flash Player for, and a game stuck in a loop can still be left with − at any time.
+- **Very long loads are no longer cut off after 15 seconds** (#130). Ruffle stops a script that runs for 15 seconds in one frame, where Flash Player asked whether to. The Switch runs ActionScript several times slower than Flash Player did: the biggest Happy Wheels levels need about 23 seconds to load and stayed on a blue screen. The limit is now 60 seconds, the most a game can ask Flash Player for, and a game stuck in a loop can still be left with − at any time. A script still running after 15 seconds while the console's memory runs out is stopped before FlashNX itself runs out of memory.
 - **Games that unpack themselves with `loadBytes` see their real address** (#130). An ActionScript 3 game that decrypts or unwraps its own code and loads it from memory was told it ran from `file:///`, where Flash Player gives it the address of the file that loaded it; a game that checks which site it runs on (the full Happy Wheels does) stopped after its preloader.
 - **Glows and shadows no longer go missing for good** (#130). FlashNX applies at most 48 filter effects per frame; past that, an effect waited for a frame where its object changed again, and an object that never changed kept it off. Happy Wheels covers its level list with a white panel that only lets its inner shadow show: coming back from a level, the list stayed white. The effects past the limit now come on the next frame.
 - **Disney games no longer stall when they send their usage statistics** (dlsnetwork.com, for example on each song chosen in DJ3000): the request is refused at once, like other trackers, instead of being tried on several mirrors first.
@@ -26,6 +28,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 - **Raze 2 no longer stays on its loading screen** (#133). Since a change in Ruffle last year, a game that jumps to a frame from code run outside the timeline had that frame's objects created only after the frame's own code ran; Raze 2's menu looked for them, found nothing and stopped. They are now created first, as Flash does. Other ActionScript 3 games built the same way benefit too.
 - **Newgrounds games that load their own files** (a level, music, another part of the game) from Newgrounds' servers got the answer FlashNX gives the Newgrounds API instead of the file. Only the API's own requests get that answer now.
 - **Flashpoint searches with a number the title does not have** ("Sonny 1", "Super Fighters 2") found nothing, because every word typed must be in the game's entry. A search that finds nothing now tries again without its numbers, and the page is titled with the words it searched (#131). Two games with the same title (the archive has two "Sonny") no longer hide each other: only the first one was listed, and the second downloads under its title and studio instead of opening the first.
+- **Leaving a game with the library sorted by Recently played**, the frame closed on the game's old place instead of the top of the list, where the game had just moved.
 
 ## v2.0.1 (2026-10-18)
 

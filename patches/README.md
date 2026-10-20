@@ -379,7 +379,7 @@ its own actions), decode time, and child-by-name lookups. Compiled out of
 release builds; the Switch dev build prints the hottest actions every 240
 frames. It is what found the cache above.
 
-**`core/src/frame_lifecycle.rs`, `display_object/movie_clip.rs` — a SWFv9
+**`core/src/frame_lifecycle.rs`, `display_object/movie_clip.rs`: a SWFv9
 goto's objects are constructed before the target frame's script (FlashNX
 #133, upstream ruffle#23532, also ruffle#15039).**
 
@@ -411,7 +411,7 @@ Menu/init()` before, its menu class started and no script error after. The
 ordering in the new tests' `output.txt` is inferred from those Flash outputs,
 not generated under Flash.
 
-**`core/src/loader.rs`, `avm2/object/loaderinfo_object.rs` — the URL of an
+**`core/src/loader.rs`, `avm2/object/loaderinfo_object.rs`: the URL of an
 ActionScript 3 movie loaded with `Loader.loadBytes` (FlashNX #130, backport of
 upstream ruffle#24025, `09efa268d`, plus the effect of `f8509a30f`).**
 
