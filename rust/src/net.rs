@@ -777,6 +777,11 @@ pub fn tick_download() -> Result<bool, Failure> {
     Err(Failure { msg: crate::loc::err_dl_failed(rc), retry: true, card: false })
 }
 
+/// The HTTP status of the last transfer that got an answer (0 when none did).
+pub fn last_http_code() -> i64 {
+    unsafe { https_last_http_code() as i64 }
+}
+
 /// Current bytes downloaded / total bytes (0 until the Content-Length
 /// header arrives).
 pub fn download_progress() -> (u64, u64) {

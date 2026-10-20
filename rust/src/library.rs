@@ -13213,6 +13213,9 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
                 Ok(true) => on_download_finished(backend),
                 Err(f) => {
                     if let Ok(mut s) = LIBRARY.lock() {
+                        if fp_try_original_after_mirror_miss(&mut s) {
+                            return;
+                        }
                         let name = s
                             .download_title
                             .clone()
@@ -13223,6 +13226,42 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
                 }
             }
         }
+    }
+}
+
+/// A legacy ("loose") Flashpoint game comes from the archive's htdocs mirror,
+/// and a few are not there while the site the archive took them from still
+/// serves them: Superfighters Ultimate, a 404 on the mirror and its 3 MB SWF
+/// at files.twoplayergames.org (#131). After the mirror's 404, the game's own
+/// address is asked once, into the same file; what comes back is checked as
+/// any download (`on_download_finished` wants a SWF's first bytes). Hosts
+/// that only exist inside Flashpoint (`localflash`) have no address to ask.
+fn fp_try_original_after_mirror_miss(s: &mut State) -> bool {
+    if !s.download_fp_direct || net::last_http_code() != 404 {
+        return false;
+    }
+    let original = s.download_launch_command.trim().to_string();
+    if original.is_empty() || original == s.download_source_url {
+        return false;
+    }
+    let Some(rest) = original.strip_prefix("http://").or_else(|| original.strip_prefix("https://")) else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if !host.contains('.') {
+        return false;
+    }
+    match net::start_download(&original, &s.download_out_path) {
+        Ok(()) => {
+            log(&std::format!(
+                "library: {} is not on Flashpoint's mirror (404), asking the game's own address {}
+",
+                s.download_source_url, original
+            ));
+            s.download_source_url = original;
+            true
+        }
+        Err(_) => false,
     }
 }
 
