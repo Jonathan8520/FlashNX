@@ -901,6 +901,7 @@ pub(crate) fn draw_settings(
     folder: (&str, &[std::string::String]),
     logo: (u32, u32, u32),
     game_count: usize,
+    games_bytes: u64,
     under: bool,
 ) {
     let u = crate::loc_ui::ui();
@@ -961,7 +962,7 @@ pub(crate) fn draw_settings(
         Body::Section { in_pane, row } => {
             let focus = if in_pane { Some(row) } else { None };
             match section {
-                SetSection::Library => library_pane(backend, focus, view_focus, game_count, &mut cells, &mut segs, &mut hints),
+                SetSection::Library => library_pane(backend, focus, view_focus, (game_count, games_bytes), &mut cells, &mut segs, &mut hints),
                 SetSection::Defaults => defaults_pane(backend, focus, armed, &mut cells, &mut segs, &mut hints),
                 SetSection::Language => {
                     font_cold = language_font_cold();
@@ -1063,7 +1064,7 @@ fn library_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
     view_focus: Option<u8>,
-    game_count: usize,
+    held: (usize, u64),
     cells: &mut std::vec::Vec<(f32, f32, f32, f32)>,
     segs: &mut crate::backend::render::CtrlSegs,
     hints: &mut std::vec::Vec<HintItem<'static>>,
@@ -1089,8 +1090,19 @@ fn library_pane(
     let folder = [Row::new(Icon::Folder, u.row_games_dir).value(shown_path(&root)).opens()];
     let (c, y, _) = b.settings_block(y + 8.0, &folder, on_row("DOSSIER"), glide);
     cells.extend(c);
-    let line = std::format!("{}  \u{00B7}  {}", u.help_games_dir, crate::loc_ui::games(game_count));
-    let y = b.settings_note(y + 8.0, &line, 3);
+    let y = b.settings_note(y + 8.0, u.help_games_dir, 3);
+    // What the folder holds: its games, and the room they take on the card
+    // (each game's file, or its file and companion folder as measured when it
+    // was downloaded). Read only: the cursor passes it by. The count used to
+    // end the note above, where three lines of help often cut it off.
+    let (count, bytes) = held;
+    let amount = if bytes > 0 {
+        std::format!("{}  \u{00B7}  {}", crate::loc_ui::games(count), crate::backend::render::imp_size(bytes))
+    } else {
+        crate::loc_ui::games(count)
+    };
+    let stats = [Row::new(Icon::HardDrive, u.row_games_held).value(&amount)];
+    let (_, y, _) = b.settings_block(y + 14.0, &stats, None, glide);
     let on = crate::loc::ui_sounds();
     let sounds = [Row::new(if on { Icon::Volume } else { Icon::VolumeOff }, u.row_sounds).toggle(on)];
     let (c, y, sg) = b.settings_block(y + 18.0, &sounds, on_row("SONS"), glide);

@@ -151,7 +151,8 @@ pub(crate) fn draw_behind(
             backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
         }
         UpdFrom::About => {
-            settings_tab::draw_settings(backend, back_to(from), folder, logo, game_count, true);
+            // The About pane: the library's size is not on it.
+            settings_tab::draw_settings(backend, back_to(from), folder, logo, game_count, 0, true);
             backend.draw_navbar_with(Tab::Reglages.index(), logo, false);
         }
     }

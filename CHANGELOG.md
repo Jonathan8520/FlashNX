@@ -7,6 +7,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 ### Added
 
 - **The full Happy Wheels, and games bigger than 4 GB** (#130). A Flashpoint archive over 4 GB is written as one file in 4 GB parts, the way Tinfoil and DBI install big games, so it fits on a FAT32 card, and an entry of any size is unpacked piece by piece. Before a download over 1 GB, FlashNX reads what the archive unpacks to, so a game that cannot fit is refused at once instead of after the download. The full Happy Wheels holds every level published until 2019 (5.2 million, with their replays) in an 18 GB database: FlashNX answers the game's level server from it, so the featured levels, the lists, the searches and the replays work offline. The archive ends in March 2019, so "this week" and "this month" count back from its last level. It needs about 27 GB free to install and 18 GB once installed; a list sorted by plays or rating, or a search over all the levels, can take a few seconds the first time, then comes back at once.
+- **Settings › Library shows how many games the card holds and the room they take**, under the games folder.
 
 ### Fixed
 

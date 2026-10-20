@@ -13424,6 +13424,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         _ => (std::string::String::new(), std::vec::Vec::new()),
     };
     let game_count = s.entries.len();
+    let games_bytes: u64 = s.entries.iter().map(|e| e.card_bytes).sum();
     drop(s);
 
     let now = unsafe { ruffle_tick_now() };
@@ -13798,7 +13799,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // A navbar TAB, not a popup: the page, its column and its pane, or
             // a page opened inside the pane.
             let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
-            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, false);
+            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, games_bytes, false);
         }
         Screen::GamesDirConfirm { .. } | Screen::SettingsKeymapEditor | Screen::SendFailed { .. } => {
             // A window over the tab: the page stays behind it, still, dimmed by
@@ -13807,7 +13808,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
             backend.clear_ui_transform();
             crate::backend::render::set_ui_screen_kind(0);
-            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, true);
+            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, games_bytes, true);
             crate::backend::render::navbar_clear();
             crate::backend::render::set_ui_screen_kind(ui_kind);
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
