@@ -6967,6 +6967,12 @@ struct GameReveal {
     /// The corner badges of the tile it grows from or shrinks to
     /// (`gallery_sel_badges`), None for a box that wears none.
     badges: Option<(bool, bool, f32)>,
+    /// A quit shrinking to the selected tile follows that tile as the views
+    /// publish it each frame (`gallery_sel_publish`), box and badges, instead
+    /// of keeping the box from before the game: sorted by last played, the
+    /// game just quit moves to the head of the grid, and the cover closed
+    /// onto the place it had been launched from.
+    follow_sel: bool,
 }
 
 fn game_reveal() -> &'static std::sync::Mutex<GameReveal> {
@@ -6984,6 +6990,7 @@ fn game_reveal() -> &'static std::sync::Mutex<GameReveal> {
         display_name: std::string::String::new(),
         color_chip: 0,
         badges: None,
+        follow_sel: false,
     });
     &A
 }
@@ -7001,10 +7008,12 @@ pub fn game_reveal_begin(
     // The badges of the tile the views published, when the reveal starts from
     // it (a launch from Jouer, the quit back to it). A launch from the
     // importer starts from a row, which wears none.
-    let badges = if rect == gallery_sel_rect_read() { gallery_sel_badges().lock().ok().map(|b| *b) } else { None };
+    let from_sel = rect == gallery_sel_rect_read();
+    let badges = if from_sel { gallery_sel_badges().lock().ok().map(|b| *b) } else { None };
     if let Ok(mut a) = game_reveal().lock() {
         a.active = true;
         a.collapsing = collapsing;
+        a.follow_sel = collapsing && from_sel;
         a.inited = false;
         a.t = 0.0;
         a.rx = rect.0;
@@ -7040,11 +7049,12 @@ pub fn game_reveal_active() -> bool {
 
 /// The reveal's tile rect + game identity `(rect, basename, display_name, color)`.
 pub fn game_reveal_info() -> ((f32, f32, f32, f32), std::string::String, std::string::String, u32) {
+    let live = gallery_sel_rect_read();
     game_reveal()
         .lock()
         .map(|a| {
             (
-                (a.rx, a.ry, a.rw, a.rh),
+                if a.follow_sel && live.2 > 0.0 && live.3 > 0.0 { live } else { (a.rx, a.ry, a.rw, a.rh) },
                 a.basename.clone(),
                 a.display_name.clone(),
                 a.color_chip,
@@ -12633,7 +12643,10 @@ impl SwitchRenderBackend {
         // star and a multi-file game's layers, and the quit's last frame put
         // them back in one go.
         if ring_alpha > 0.0 {
-            if let Some((fav, multi, inset)) = game_reveal().lock().ok().and_then(|a| a.badges) {
+            let badges = game_reveal().lock().ok().and_then(|a| {
+                if a.follow_sel { gallery_sel_badges().lock().ok().map(|b| *b) } else { a.badges }
+            });
+            if let Some((fav, multi, inset)) = badges {
                 if fav {
                     self.kit_favorite_chip_faded(x + inset, y + inset, ring_alpha);
                 }
