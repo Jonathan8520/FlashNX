@@ -1389,6 +1389,14 @@ pub extern "C" fn ruffle_init() -> c_int {
         // nothing at all, which is the white scene the report describes.
         .with_video(ruffle_video_software::backend::SoftwareVideoBackend::new())
         .with_log(SwitchLogBackend::new())
+        // Ruffle stops a script that has run 15 s in one frame, where Flash
+        // Player asked whether to. The Switch runs ActionScript several times
+        // slower than Flash Player did, and the biggest Happy Wheels levels
+        // need about 23 s to load (15.5 s, then 7.5 s): cut at 15, they stayed
+        // on a blue screen (#130). 60 s is the most a movie may ask for itself
+        // (ScriptLimits), and `-` opens the pause inside a running script from
+        // 0.5 s on, so a stuck one can still be left.
+        .with_max_execution_duration(core::time::Duration::from_secs(60))
         .with_storage(std::boxed::Box::new(storage))
         // Custom UI backend: its only job over NullUiBackend is to forward
         // Ruffle's open/close-virtual-keyboard hooks (fired when an editable
