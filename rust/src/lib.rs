@@ -2992,6 +2992,7 @@ fn script_hook(
         fn flashnx_take_minus_pressed() -> c_int;
         fn flashnx_applet_ok() -> c_int;
         fn flashnx_exit_requested() -> c_int;
+        fn flashnx_heap_stats(out: *mut u64);
     }
     const ZERO: core::time::Duration = core::time::Duration::ZERO;
     if FROZEN_REQUEST.load(Relaxed) != 0 {
@@ -3020,6 +3021,27 @@ fn script_hook(
                     elapsed.as_millis()
                 ));
                 return (true, ZERO);
+            }
+            // Past the 15 s after which Flash Player asked whether to stop a
+            // script, one that is eating the heap is stopped as the timeout
+            // would, before an allocation fails and takes FlashNX down with it.
+            // The limit is 60 s now, for the loads that need it (Happy Wheels'
+            // big levels), and a script meant never to end could run into the
+            // end of memory first: DoSWF's guard in MARIO and YOSHI Fast Run, a
+            // loop growing a string, had used all 2.3 GB at 40 s. The garbage
+            // of a running script is only collected between frames.
+            if elapsed >= core::time::Duration::from_secs(15) {
+                let mut heap = [0u64; 8];
+                unsafe { flashnx_heap_stats(heap.as_mut_ptr()) };
+                // The biggest block the heap could still hand out.
+                if heap[4] < 256 * 1024 * 1024 {
+                    log_str(&std::format!(
+                        "script: running for {} ms with {} MB left in one block, stopped before memory runs out\n",
+                        elapsed.as_millis(),
+                        heap[4] / (1024 * 1024)
+                    ));
+                    return (true, ZERO);
+                }
             }
         }
     }
