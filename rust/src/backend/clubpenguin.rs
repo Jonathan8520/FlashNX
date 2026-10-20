@@ -1,4 +1,4 @@
-//! Puffle Launch and DJ3000 save again (#134).
+//! Puffle Launch and DJ3000 save again (#134), and Pufflescape keeps its scores.
 //!
 //! Club Penguin's minigames saved through the game they ran in: the Club
 //! Penguin client (`_global.getCurrentShell()`) and its connection to the
@@ -23,8 +23,25 @@
 //! penguin's colour) stays unanswered, as it is today without a client: those
 //! calls did nothing. Only these games: 47 of Flashpoint's Club Penguin games
 //! look for the client, and finding one changes what they do.
+//!
+//! Pufflescape is an AS3 game started by a host movie, `HostEmulator.swf`
+//! (Club Penguin's 2011 test host, which Flashpoint launches): the game asks
+//! it which stamps the player has, to open its levels, and kept nothing of
+//! its own, not even on Club Penguin. Its O-berries, rare berry and time per
+//! level lived on the level select's icons and were gone at the next launch.
+//! That host is replaced by `pufflescape_host/` (compiled to
+//! `pufflescape_host.bin`): the same answers, every stamp earned as before,
+//! and the icons' scores kept in a SharedObject and put back on them.
 
 const SHIM: &[u8] = include_bytes!("clubpenguin_shell.bin");
+
+/// FlashNX's Pufflescape host: `pufflescape_host/HostEmulator.as` and
+/// `CPHostEmulator.as` compiled into the original host movie, so its frame,
+/// stage size and frame rate are the same. To rebuild it, with JPEXS FFDec:
+///   ffdec-cli -replace HostEmulator.swf out.swf com.clubpenguin.CPHostEmulator CPHostEmulator.as HostEmulator HostEmulator.as
+/// where HostEmulator.swf is Flashpoint's
+/// (media1.clubpenguin.com/play/v2/games/pufflescape/HostEmulator.swf).
+const PUFFLESCAPE_HOST: &[u8] = include_bytes!("pufflescape_host.bin");
 
 /// The games this applies to, by their movie's address.
 fn is_listed(url: &str) -> bool {
@@ -35,6 +52,10 @@ fn is_listed(url: &str) -> bool {
 
 /// The movie to play for `url`: `None` to play `swf` as it is.
 pub fn prepare(url: &str, swf: &[u8]) -> Option<Vec<u8>> {
+    if url.to_ascii_lowercase().contains("/games/pufflescape/hostemulator.swf") {
+        tracing::info!("clubpenguin: FlashNX's host given to {url}, scores kept");
+        return Some(PUFFLESCAPE_HOST.to_vec());
+    }
     if !is_listed(url) || swf.len() < 8 {
         return None;
     }
