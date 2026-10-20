@@ -2430,44 +2430,6 @@ fn cache_game_footprint(swf_path: &str) {
     }
 }
 
-/// One-time migration (marker-guarded): compute + cache the real footprint of
-/// EVERY already-installed multi-file game, so their footer size is correct
-/// without a re-download. This walks the `.files/` trees ONCE (blocking, a few
-/// seconds — dominated by Super Smash Flash 2's 1474 files); afterwards the scan
-/// only reads the cached `<swf>.filesize`. New downloads are cached at download
-/// time, so they're skipped here (already have the sidecar).
-fn backfill_game_sizes() {
-    let marker = primary_user_path(".filesize_backfill1.done");
-    if crate::sources::gamezip::read_file_bounded(&marker, 4).is_some() {
-        return; // already backfilled on a previous boot
-    }
-    let paths: std::vec::Vec<std::string::String> = match LIBRARY.lock() {
-        Ok(g) => g.entries.iter().map(|e| e.path.clone()).collect(),
-        Err(_) => return,
-    };
-    let mut done = 0usize;
-    for swf_path in &paths {
-        if read_filesize_cache(swf_path).is_some() {
-            continue; // already cached (new download, or a prior partial run)
-        }
-        cache_game_footprint(swf_path); // walks + writes .filesize for multi-file games
-        if let Some(sz) = read_filesize_cache(swf_path) {
-            if let Ok(mut g) = LIBRARY.lock() {
-                if let Some(e) = g.entries.iter_mut().find(|e| e.path == *swf_path) {
-                    // Reflect it now, without waiting for a re-scan.
-                    e.size_bytes = sz;
-                    e.card_bytes = sz;
-                    e.multi = true;
-                }
-            }
-            done += 1;
-        }
-    }
-    log(&std::format!("filesize: backfilled {} multi-file game footprints\n", done));
-    let _ = std::fs::write(&marker, b"1");
-    crate::sd::commit();
-}
-
 /// Every path seen by the SD scan's `readdir` (games AND sidecars), so a
 /// sidecar's existence is a memory lookup instead of an SD probe. Filled by
 /// `ruffle_library_note_file` before any `add_path` for that directory.
@@ -3187,93 +3149,7 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
 
 /// Transition from Inactive → List (or Empty if `entries` is empty). Called
 /// after C++ has finished scanning and the GL renderer is up.
-/// One-time cleanup (guarded by a marker file): remove the redundant copy of
-/// each game's ENTRY SWF from its `.files/` tree. The entry SWF is stored flat
-/// as `<game>.swf` and the SidecarNavigator serves the entry URL from that flat
-/// file, so the identical tree copy is dead weight — up to ~30 MB for a
-/// single-SWF GameZIP (e.g. Infiltrating the Airship). New downloads never write
-/// it (see `gamezip::extract_gamezip_tree`); this reclaims it on games already
-/// on the SD. `<game>.swf.base` gives the entry URL; non-zipped / single-file
-/// games have no host-pathed tree copy, so the computed path is absent and the
-/// delete is a harmless no-op.
-fn cleanup_duplicate_entries() {
-    // v2 marker: re-runs once on installs cleaned by v1 to also prune the empty
-    // dir chains the first pass left behind.
-    let marker = primary_user_path(".entry_dedup2.done");
-    if crate::sources::gamezip::read_file_bounded(&marker, 4).is_some() {
-        return; // already cleaned on a previous boot
-    }
-    // Snapshot game paths under the lock; do the fs work without holding it.
-    let paths: std::vec::Vec<std::string::String> = match LIBRARY.lock() {
-        Ok(g) => g.entries.iter().map(|e| e.path.clone()).collect(),
-        Err(_) => return,
-    };
-    let mut removed = 0usize;
-    for swf_path in &paths {
-        let base_path = std::format!("{}.base", swf_path);
-        let Some(url) = crate::sources::gamezip::read_file_bounded(&base_path, 4096)
-            .and_then(|b| std::string::String::from_utf8(b).ok())
-        else {
-            continue; // no `.base` → single-file / non-Flashpoint game, nothing to dedup
-        };
-        let url = url.trim();
-        let Some(rest) = url
-            .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"))
-        else {
-            continue;
-        };
-        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-        if rest.is_empty() || rest.ends_with('/') {
-            continue;
-        }
-        // Containment: a `..` segment must never walk this unlink out of the
-        // game's own `.files/` dir. No catalog entry is known to carry one, but
-        // the READ path already guards it (`SidecarNavigator::push_segments`) and
-        // a DELETE path must not be laxer than the read path.
-        if rest.split('/').any(|s| s == "..") {
-            continue;
-        }
-        // `<game>.files/<host>/<path>/<entry>.swf` — the tree copy of the entry
-        // SWF (only zipped GameZIPs have a host-pathed tree here; others no-op).
-        let files_root = crate::sidecar_dir_for(Some(swf_path))
-            .to_string_lossy()
-            .trim_end_matches('/')
-            .to_string();
-        let tree_entry = std::format!("{}/{}", files_root, rest);
-        if std::fs::remove_file(&tree_entry).is_ok() {
-            removed += 1;
-            log(&std::format!("dedup: removed redundant tree entry {}\n", tree_entry));
-        }
-        // Prune the now-empty dir chain up to (and including) `<game>.files/`.
-        // `remove_dir` (rmdir) only succeeds on an EMPTY dir, so a multi-file
-        // game's populated companion dirs are left untouched. Runs whether we
-        // removed the entry just now or a previous (v1) pass did.
-        let mut cur = std::path::Path::new(&tree_entry).parent().map(|p| p.to_path_buf());
-        while let Some(d) = cur {
-            if !d.to_string_lossy().starts_with(&files_root) {
-                break; // climbed above <game>.files/
-            }
-            if std::fs::remove_dir(&d).is_err() {
-                break; // non-empty (companions remain) or already gone
-            }
-            cur = d.parent().map(|p| p.to_path_buf());
-        }
-    }
-    log(&std::format!(
-        "dedup: cleaned {} redundant entry-SWF tree copies\n",
-        removed
-    ));
-    let _ = std::fs::write(&marker, b"1");
-    crate::sd::commit();
-}
-
 pub fn open() {
-    // The one-time first-boot housekeeping (dedup + size backfill) is NOT run
-    // here: it blocks a few seconds and open() runs before the first frame, so
-    // doing it inline would be a black screen. It's deferred to `render` behind
-    // the "Optimisation" loading panel instead (see `maybe_arm_startup_migrations`
-    // / `PendingNet::RunStartupMigrations`), which shows a frame first, then runs.
     // Any finger business from before a game launched is over.
     touch_press_cancel();
     crate::backend::render::row_touch_cancel();
@@ -12552,9 +12428,6 @@ enum PendingNet {
     ShareProfile { game_idx: usize },
     ApplyProfile { game_idx: usize, profile_idx: usize },
     DeleteProfile { game_idx: usize, profile_idx: usize },
-    /// One-time first-boot housekeeping (dedup + size backfill), run behind the
-    /// "Optimisation" loading panel instead of freezing on a black screen.
-    RunStartupMigrations,
     /// OPTIONS > JAQUETTE, or Minus in the cover picker: the Flashpoint search
     /// for `query` (HTTPS), then the picker.
     CoverSearch { game_idx: usize, query: std::string::String },
@@ -12565,10 +12438,6 @@ static PENDING_NET: Mutex<Option<(PendingNet, bool)>> = Mutex::new(None);
 static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
 /// The screen the deferred flow started from, drawn under its loading card.
 static NET_LOADING_FROM: Mutex<Option<Screen>> = Mutex::new(None);
-/// True while the first-boot "Optimisation" modal should overlay the gallery:
-/// set when the housekeeping is queued, cleared once it finishes. The screen
-/// itself stays on JOUER, so the modal composites over the (dimmed) gallery.
-static OPTIMIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// First-open warm-up for the language picker: 0 = cold, 1 = panel shown (font not
 /// loaded yet), 2 = loaded. The picker lists every language's NATIVE name incl.
@@ -12599,7 +12468,6 @@ fn defer_net(action: PendingNet, game_idx: usize) {
         PendingNet::ShareProfile { .. } => u.loading_share,
         PendingNet::ApplyProfile { .. } => u.loading_apply,
         PendingNet::DeleteProfile { .. } => u.loading_delete,
-        PendingNet::RunStartupMigrations => crate::loc::s().optimizing,
         PendingNet::CoverSearch { .. } => u.loading_covers,
         PendingNet::CoverFetch { .. } => u.loading_cover_dl,
     }
@@ -12632,8 +12500,8 @@ fn defer_net(action: PendingNet, game_idx: usize) {
 /// next call runs the blocking flow, which transitions to the result screen.
 /// Called at the top of `render`, before the screen is drawn.
 fn drive_pending_net() {
-    // First frame after boot may queue the one-time housekeeping behind the panel.
-    maybe_arm_startup_migrations();
+    // What a power-off left, on the first frame after boot.
+    startup_cleanup();
     let action = {
         let mut g = match PENDING_NET.lock() {
             Ok(g) => g,
@@ -12648,24 +12516,7 @@ fn drive_pending_net() {
             Some((a, true)) => a, // run now (last frame's panel is on the display)
         }
     };
-    // Another deferred flow can only be in the slot if it replaced our queued
-    // migration (both write PENDING_NET). Drop the overlay in that case, so the
-    // modal can't linger over the UI for a migration that will never run; the
-    // markers stay unwritten, so the next boot simply retries.
-    if !matches!(action, PendingNet::RunStartupMigrations) {
-        OPTIMIZING.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
     match action {
-        PendingNet::RunStartupMigrations => {
-            // Order matters: dedup first (so the freed entry copy isn't counted),
-            // then the footprint backfill. Both self-guard on their own markers,
-            // so this is a fast no-op once either has already run. The modal armed
-            // last frame is on the display during this blocking work; drop it once
-            // done so this frame redraws the plain gallery.
-            cleanup_duplicate_entries();
-            backfill_game_sizes();
-            OPTIMIZING.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
         PendingNet::OpenProfiles { game_idx } => run_open_profiles_flow(game_idx),
         PendingNet::OpenShareConfirm { game_idx } => run_open_share_confirm_flow(game_idx),
         PendingNet::ShareProfile { game_idx } => run_share_profile_flow(game_idx),
@@ -12680,14 +12531,12 @@ fn drive_pending_net() {
     }
 }
 
-/// On the first render frame of a boot, if the one-time housekeeping (entry
-/// dedup + size backfill) hasn't run yet, raise the `OPTIMIZING` overlay flag and
-/// queue `RunStartupMigrations`. The screen stays on JOUER, so a bordered
-/// "Optimisation" modal composites over the dimmed gallery. The arm-then-run
-/// cadence of `drive_pending_net` shows that modal for a frame before the
-/// blocking work runs, so it isn't a black screen. Considered once per boot; a
-/// no-op when both markers are already present.
-fn maybe_arm_startup_migrations() {
+/// On the first render frame of a boot, what a power-off left behind: a
+/// GameZIP download's archive, an extraction's half-written folder. Once per
+/// boot. (It also queued, until 2.0.2, the one-time "Optimisation" step of
+/// libraries from before 1.6.0: duplicate entry SWFs and the sizes of
+/// multi-file games. Retired: every library since August has had it.)
+fn startup_cleanup() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static CHECKED: AtomicBool = AtomicBool::new(false);
     if CHECKED.swap(true, Ordering::Relaxed) {
@@ -12709,29 +12558,6 @@ fn maybe_arm_startup_migrations() {
         }
         let _ = std::fs::remove_file(&marker);
         crate::sd::commit();
-    }
-    let has = |name: &str| {
-        crate::sources::gamezip::read_file_bounded(&primary_user_path(name), 4).is_some()
-    };
-    if has(".entry_dedup2.done") && has(".filesize_backfill1.done") {
-        return; // nothing to migrate — skip the panel entirely
-    }
-    // An empty library has nothing to migrate: skip the modal WITHOUT stamping the
-    // markers. Stamping them here would retire the migration for good, so a library
-    // restored AFTERWARDS (SD backup, FTP copy, card swap — how users actually move
-    // their games) would keep its duplicate entry SWFs and wrong footer sizes with
-    // no way to re-trigger it. Re-checked on a later boot instead; the cost when
-    // there is genuinely nothing to do is two 4-byte reads.
-    if LIBRARY.lock().map(|s| s.entries.is_empty()).unwrap_or(true) {
-        return;
-    }
-    // Overlay the "Optimisation" modal on the gallery and queue the (blocking)
-    // housekeeping. The screen stays on JOUER, so the modal composites over the
-    // dimmed gallery. `drive_pending_net`'s arm-then-run cadence gives it a frame
-    // on screen before the work runs.
-    OPTIMIZING.store(true, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(mut p) = PENDING_NET.lock() {
-        *p = Some((PendingNet::RunStartupMigrations, false));
     }
 }
 
@@ -13198,7 +13024,7 @@ fn remove_tree(dir: &str) -> bool {
 /// Where an extraction is written, noted on the card while it runs
 /// (`extract_gamezip_main`): a power-off or a crash meanwhile left a
 /// half-written `<game>.files/` the library never shows, up to 18 GB for
-/// Happy Wheels. The next start removes it (`maybe_arm_startup_migrations`).
+/// Happy Wheels. The next start removes it (`startup_cleanup`).
 fn extract_marker_path() -> std::string::String {
     std::format!("{}/.fpdl.extracting", primary_root())
 }
@@ -14474,14 +14300,6 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 None => backend.draw_toast(&msg, kind),
             }
         }
-    }
-
-    // First-boot housekeeping: a bordered "Optimisation" modal composited over
-    // the dimmed gallery while the deferred migration runs. Drawn last so it sits
-    // on top; the flag is set by `maybe_arm_startup_migrations` and cleared once
-    // `RunStartupMigrations` finishes.
-    if OPTIMIZING.load(std::sync::atomic::Ordering::Relaxed) {
-        backend.draw_optimizing_modal(crate::loc::s().optimizing, now);
     }
 }
 

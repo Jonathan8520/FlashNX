@@ -550,13 +550,9 @@ pub struct Strings {
     /// two flows share the relay, but a player who sent an idea was being told
     /// their "report" was sent (#83).
     pub suggest_ok_msg: &'static str,
-    // First-boot size backfill panel title (v1.5.x): shown while the one-time
-    // footprint recompute runs, so that migration isn't a black screen.
-    pub optimizing: &'static str,
 }
 
 const EN: Strings = Strings {
-    optimizing: "Updating your library…",
     menu_resume: "Resume",
     menu_keys: "Controls and cursor",
     menu_screen: "Screen",
@@ -733,7 +729,6 @@ const EN: Strings = Strings {
 };
 
 const FR: Strings = Strings {
-    optimizing: "Mise à jour de ta bibliothèque…",
     menu_resume: "Reprendre",
     menu_keys: "Touches et curseur",
     menu_screen: "Écran",
@@ -910,7 +905,6 @@ const FR: Strings = Strings {
 };
 
 const ES: Strings = Strings {
-    optimizing: "Actualizando tu biblioteca…",
     menu_resume: "Reanudar",
     menu_keys: "Controles y cursor",
     menu_screen: "Imagen",
@@ -1088,7 +1082,6 @@ const ES: Strings = Strings {
 
 // Russian.
 const RU: Strings = Strings {
-    optimizing: "Обновление библиотеки…",
     menu_resume: "Продолжить",
     menu_keys: "Клавиши и курсор",
     menu_screen: "Изображение",
@@ -1266,7 +1259,6 @@ const RU: Strings = Strings {
 
 // German.
 const DE: Strings = Strings {
-    optimizing: "Deine Bibliothek wird aktualisiert…",
     menu_resume: "Fortsetzen",
     menu_keys: "Steuerung und Cursor",
     menu_screen: "Bildschirm",
@@ -1444,7 +1436,6 @@ const DE: Strings = Strings {
 
 // Italian.
 const IT: Strings = Strings {
-    optimizing: "Aggiornamento della libreria…",
     menu_resume: "Riprendi",
     menu_keys: "Comandi e cursore",
     menu_screen: "Immagine",
@@ -1622,7 +1613,6 @@ const IT: Strings = Strings {
 
 // Portuguese (Brazil).
 const PT: Strings = Strings {
-    optimizing: "Atualizando sua biblioteca…",
     menu_resume: "Continuar",
     menu_keys: "Controles e cursor",
     menu_screen: "Imagem",
@@ -1801,7 +1791,6 @@ const PT: Strings = Strings {
 // Simplified Chinese (issue #41). Prose uses Chinese punctuation; names,
 // paths and URLs stay in Latin script.
 const ZH: Strings = Strings {
-    optimizing: "正在更新游戏库…",
     menu_resume: "继续",
     menu_keys: "按键与光标",
     menu_screen: "屏幕",
@@ -1979,7 +1968,6 @@ const ZH: Strings = Strings {
 
 // Turkish.
 const TR: Strings = Strings {
-    optimizing: "Kütüphanen güncelleniyor…",
     menu_resume: "Devam et",
     menu_keys: "Kontroller ve imleç",
     menu_screen: "Görüntü",

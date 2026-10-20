@@ -22,11 +22,7 @@ pub(crate) fn drive() {
     let Ok(mut s) = LIBRARY.lock() else { return };
     match s.screen {
         Screen::List { selection, scroll_offset } => {
-            // Never over the housekeeping's window, nor over a window still
-            // closing onto the grid.
-            if OPTIMIZING.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
+            // Never over a window still closing onto the grid.
             if PENDING_AFTER_CLOSE.lock().map(|g| g.is_some()).unwrap_or(true) {
                 return;
             }

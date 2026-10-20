@@ -14973,14 +14973,6 @@ impl SwitchRenderBackend {
         self.draw_loading_panel(title, now);
     }
 
-    /// The one-time housekeeping after an update, over the live gallery the
-    /// caller drew first: the small loading card, saying what is being done.
-    pub fn draw_optimizing_modal(&mut self, title: &str, now: u64) {
-        // The same small card as every other wait, saying what is being done.
-        let vw = self.dimensions.width as f32;
-        self.draw_loading_card(title, now, 0.0, vw);
-    }
-
     // ── Mask state machine ──
     //
     // Flash mask sequence for one mask:
