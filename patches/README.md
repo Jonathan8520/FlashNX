@@ -430,6 +430,22 @@ signature change everywhere). `LoaderLoadBytesTest` now passes (upstream's
 test change taken); `LoaderLoadBytesTest2` stays a known failure, its
 70-byte loadee not being AS3.
 
+**`core/src/avm2/activation_jit.rs`: `lookupswitch` is compiled.**
+
+A method with a `switch` was rejected whole by the JIT. Stencyl games write
+their behaviours as switches: The Little Who had 121 methods interpreted, 93
+of them for this alone, and a profile put the interpreter at 57 % of its
+frames. The compiled code pops the index the way `lookup_switch` reads it
+(`as_i32`, helper `h_switch`), then compares it with each case in table order
+(`cmp w0, #k`, `b.eq`); anything else, a negative index included, goes to the
+default. A backward case or default polls the timeout first, like any
+backward branch. Every case and the default are branch targets (the stack
+cache is written back) and successors in the depth walk; a switch of 4096
+cases or more is still rejected (12-bit compare). On the console: 121 -> 30
+rejected methods (28 try/catch, and two that pass the switch but exceed
+1 MB of code, `bad branch`, interpreted as before), no deopt, no script
+error in a session of play.
+
 **Super Smash Flash 2, October 2026: memory and speed.** Measured on the
 console over a dozen sessions; the full suite (host build, GNU toolchain)
 passes 4063 tests with the same two known failures after each step. The

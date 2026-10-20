@@ -1371,10 +1371,10 @@ index ed1ff3034..cc6620d6f 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..3a1c9faa0
+index 000000000..5686a1983
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1899 @@
+@@ -0,0 +1,1948 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1443,6 +1443,8 @@ index 000000000..3a1c9faa0
 +const CODE_SIZE: usize = 16 << 20;
 +/// Helper table: 0..KINDS = `h_op::<K>`, then the special helpers.
 +const KINDS: usize = 160;
++/// `lookupswitch`'s index (`h_switch`).
++const H_SWITCH: usize = 247;
 +const H_ARRAY_GET: usize = 248;
 +const H_CALL: usize = 249;
 +const H_GENERIC: usize = 250;
@@ -2085,10 +2087,10 @@ index 000000000..3a1c9faa0
 +        Sf32 | Sf64 | Si16 | Si32 | Si8 => (2, 0),
 +        Throw => (1, 0),
 +        Jump { .. } => (0, 0),
-+        IfTrue { .. } | IfFalse { .. } | PopJump { .. } => (1, 0),
++        IfTrue { .. } | IfFalse { .. } | PopJump { .. } | LookupSwitch(_) => (1, 0),
 +        ReturnValue { .. } => (1, 0),
 +        ReturnVoid { .. } => (0, 0),
-+        Timestamp | LookupSwitch(_) | NewCatch { .. } => return None,
++        Timestamp | NewCatch { .. } => return None,
 +    })
 +}
 +
@@ -2127,13 +2129,22 @@ index 000000000..3a1c9faa0
 +        if nd > ms {
 +            return Err("overflow".into());
 +        }
-+        let succ: [Option<usize>; 2] = match op {
-+            Op::Jump { offset } | Op::PopJump { offset } => [Some(*offset), None],
-+            Op::IfTrue { offset } | Op::IfFalse { offset } => [Some(i + 1), Some(*offset)],
-+            Op::ReturnValue { .. } | Op::ReturnVoid { .. } | Op::Throw => [None, None],
-+            _ => [Some(i + 1), None],
++        let succ: std::vec::Vec<usize> = match op {
++            Op::Jump { offset } | Op::PopJump { offset } => std::vec![*offset],
++            Op::IfTrue { offset } | Op::IfFalse { offset } => std::vec![i + 1, *offset],
++            Op::LookupSwitch(ls) => {
++                // One compare per case, `cmp w0, #k`: 12 bits of k.
++                if ls.case_offsets.len() >= 4096 {
++                    return Err("switch size".into());
++                }
++                let mut t: std::vec::Vec<usize> = ls.case_offsets.iter().map(|c| c.get()).collect();
++                t.push(ls.default_offset.get());
++                t
++            }
++            Op::ReturnValue { .. } | Op::ReturnVoid { .. } | Op::Throw => std::vec::Vec::new(),
++            _ => std::vec![i + 1],
 +        };
-+        for t in succ.into_iter().flatten() {
++        for t in succ {
 +            if t >= n {
 +                return Err("falls off".into());
 +            }
@@ -2153,6 +2164,13 @@ index 000000000..3a1c9faa0
 +            && *offset < n
 +        {
 +            target[*offset] = true;
++        }
++        if let Op::LookupSwitch(ls) = op {
++            for t in ls.case_offsets.iter().map(|c| c.get()).chain(std::iter::once(ls.default_offset.get())) {
++                if t < n {
++                    target[t] = true;
++                }
++            }
 +        }
 +    }
 +    let lay = s.layout.clone();
@@ -2352,6 +2370,24 @@ index 000000000..3a1c9faa0
 +                    a.call(H_TIMEOUT, 0, 0, 0, true);
 +                }
 +                a.branch(Fix::B, Target::Op(*offset));
++            }
++            Op::LookupSwitch(ls) => {
++                // The index as the interpreter takes it (`lookup_switch`: the
++                // top as i32), then one compare per case, in the order of the
++                // table; anything else, a negative index included, is the
++                // default. Switches are short (Stencyl's behaviours, #130's
++                // round: 93 methods refused for this alone in The Little Who).
++                let cases: std::vec::Vec<usize> = ls.case_offsets.iter().map(|c| c.get()).collect();
++                let default = ls.default_offset.get();
++                if cases.iter().any(|&t| t <= i) || default <= i {
++                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                }
++                a.call(H_SWITCH, d, 0, 0, false);
++                for (k, &t) in cases.iter().enumerate() {
++                    a.cmp_w(0, k as u32);
++                    a.branch(Fix::BCond(EQ), Target::Op(t));
++                }
++                a.branch(Fix::B, Target::Op(default));
 +            }
 +            Op::IfTrue { offset } | Op::IfFalse { offset } => {
 +                if *offset <= i {
@@ -2709,6 +2745,18 @@ index 000000000..3a1c9faa0
 +    }
 +}
 +
++/// `lookupswitch`: pops the index (the op's operand, at `depth`) and returns it
++/// as the interpreter reads it (`lookup_switch`), the compiled code comparing
++/// it with the cases.
++unsafe extern "C" fn h_switch(ctx: *mut Ctx, depth: u32, _: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        act.pop_stack().as_i32() as u32
++    }
++}
++
 +unsafe extern "C" fn h_timeout(ctx: *mut Ctx, _: u32, _: u32, _: u32) -> u32 {
 +    unsafe {
 +        let c = &mut *ctx;
@@ -2932,6 +2980,7 @@ index 000000000..3a1c9faa0
 +    t[H_CALL] = h_call_method as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_ARRAY_GET] = h_array_get as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TRUTHY] = h_truthy as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_SWITCH] = h_switch as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +}

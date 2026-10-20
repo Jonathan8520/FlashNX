@@ -9,6 +9,10 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 - **The full Happy Wheels, and games bigger than 4 GB** (#130). A Flashpoint archive over 4 GB is written as one file in 4 GB parts, the way Tinfoil and DBI install big games, so it fits on a FAT32 card, and an entry of any size is unpacked piece by piece. Before a download over 1 GB, FlashNX reads what the archive unpacks to, so a game that cannot fit is refused at once instead of after the download. The full Happy Wheels holds every level published until 2019 (5.2 million, with their replays) in an 18 GB database: FlashNX answers the game's level server from it, so the featured levels, the lists, the searches and the replays work offline. The archive ends in March 2019, so "this week" and "this month" count back from its last level. It needs about 27 GB free to install and 18 GB once installed; a list sorted by plays or rating, or a search over all the levels, can take a few seconds the first time, then comes back at once.
 - **Settings › Library shows how many games the card holds and the room they take**, under the games folder.
 
+### Performance
+
+- **More ActionScript 3 runs as native code.** A function containing a `switch` was left to the interpreter. Stencyl games write much of their logic that way: The Little Who had 93 functions interpreted for that reason alone. They are now compiled like the rest.
+
 ### Fixed
 
 - **Closing FlashNX from the HOME Menu no longer loses saves** (#134). HOME, then Close, ended FlashNX on the spot, so a game kept only what it had explicitly asked to store: what Flash Player wrote when a page closed was lost (Mario 63's level editor and coin records, for example), and so was the session's play time. FlashNX now ends the game the way Quit does while the console says the software is closing. This applies when FlashNX runs as an application (the Homebrew Menu opened from a game, or a HOME Menu icon), not from the Album.
