@@ -2,6 +2,12 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## Unreleased
+
+### Fixed
+
+- **Games that decompress themselves on their loading screen now start.** Some games ship packed inside a small loader, apparat's Matryoshka, that decompresses them in ActionScript: Ruffle never reached the end, stopped the script after 60 seconds and the game stayed on its loading screen for good (Glorg stayed on "decrunching"). FlashNX now decompresses them itself, in a second or two.
+
 ## v2.0.2 (2026-10-21)
 
 FlashNX now installs the full Happy Wheels with all its levels, keeps the progress of more games, and starts games that stopped on their loading screen.

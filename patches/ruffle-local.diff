@@ -20,8 +20,424 @@ index ddc2ef98c..0e2ee1adf 100644
  serde = ["serde/derive"]
  
  [build-dependencies]
+diff --git a/core/common/src/flashnx_matryoshka.rs b/core/common/src/flashnx_matryoshka.rs
+new file mode 100644
+index 000000000..f3522de0c
+--- /dev/null
++++ b/core/common/src/flashnx_matryoshka.rs
+@@ -0,0 +1,398 @@
++//! FlashNX: movies packed with apparat's Matryoshka, unpacked natively.
++//!
++//! Matryoshka is a small AS3 movie whose only job is to LZMA-decode the real
++//! game, embedded as the `DefineBinaryData` bound to the class
++//! `MatryoshkaContent_byteArrayAsset`, with a decoder written in ActionScript
++//! (`apparat.lzma.LZMADecoder`), then to `Loader.loadBytes` the result. Flash
++//! Player runs that decoder in a few seconds; Ruffle's AVM2 does not finish
++//! it before the script time limit, on PC either (ruffle#16026, Super Mario
++//! Bros. Crossover; ruffle#20355, Glorg). On the console the game never
++//! started (#136): 60 s inside `Matryoshka/onAddedToStage` for a 42.7 MB
++//! game, then the script was terminated.
++//!
++//! So `SwfMovie::from_data` hands back the decoded game in place of the
++//! wrapper, whether the wrapper is the movie launched or one loaded by another
++//! movie (Super Mario Bros. Crossover loads it with `loadBytes` from a Flex
++//! preloader). The wrapper only shows a loading screen and loads the game into
++//! its own application domain, so nothing the game relies on is lost. On PC
++//! this decoder takes 0.75 s for that game, against 1.2 s for lzma-rs; its
++//! output is checked byte for byte against liblzma.
++
++use std::time::Instant;
++use swf::TagCode;
++
++/// The class mxmlc gives the `byteArrayAsset` embed of `MatryoshkaContent`.
++const CONTENT_CLASS: &[u8] = b"MatryoshkaContent_byteArrayAsset";
++
++/// Same bound as the console's SWF reader: a size above it is not a game.
++const MAX_OUT: usize = 1024 * 1024 * 1024;
++
++/// The game inside a Matryoshka wrapper, given the wrapper's decompressed tags
++/// (`SwfBuf::data`). `None` for any other movie, and when the payload does not
++/// decode to a movie: the wrapper then runs as it is.
++pub(crate) fn unwrap(tags: &[u8], is_as3: bool) -> Option<Vec<u8>> {
++    // The wrapper is AS3; ActionScript 2 movies are never walked.
++    if !is_as3 {
++        return None;
++    }
++    let mut payloads: Vec<(u16, &[u8])> = Vec::new();
++    let mut content_id = None;
++    let mut rest = tags;
++    // Only tag headers are read, so walking a large game costs nothing.
++    while rest.len() >= 2 {
++        let head = u16::from_le_bytes([rest[0], rest[1]]);
++        let (code, mut len, mut start) = (head >> 6, (head & 0x3f) as usize, 2usize);
++        if len == 0x3f {
++            len = u32::from_le_bytes(rest.get(2..6)?.try_into().ok()?) as usize;
++            start = 6;
++        }
++        let body = rest.get(start..start.checked_add(len)?)?;
++        rest = &rest[start + len..];
++        match code {
++            c if c == TagCode::End as u16 => break,
++            c if c == TagCode::DefineBinaryData as u16 => {
++                // Character id, 4 reserved bytes, then the data; kept when it
++                // starts like an LZMA-alone stream (properties under 225, the
++                // range coder's first byte 0).
++                if let Some(data) = body.get(6..)
++                    && data.len() > 18
++                    && data[0] < 225
++                    && data[13] == 0
++                {
++                    payloads.push((u16::from_le_bytes([body[0], body[1]]), data));
++                }
++            }
++            c if c == TagCode::SymbolClass as u16 => {
++                let mut links = body.get(2..)?;
++                while links.len() > 2 {
++                    let id = u16::from_le_bytes([links[0], links[1]]);
++                    let name_len = links[2..].iter().position(|&b| b == 0)?;
++                    if &links[2..2 + name_len] == CONTENT_CLASS {
++                        content_id = Some(id);
++                    }
++                    links = &links[2 + name_len + 1..];
++                }
++            }
++            _ => {}
++        }
++    }
++    let content_id = content_id?;
++    let payload = payloads.iter().find(|(id, _)| *id == content_id)?.1;
++
++    let started = Instant::now();
++    let game = decode_alone(payload, MAX_OUT).filter(|game| {
++        game.len() > 8 && matches!(&game[..3], b"FWS" | b"CWS" | b"ZWS")
++    });
++    match &game {
++        Some(game) => tracing::info!(
++            "Matryoshka wrapper: its game decoded here, {} -> {} bytes in {} ms",
++            payload.len(),
++            game.len(),
++            started.elapsed().as_millis()
++        ),
++        None => tracing::warn!(
++            "Matryoshka wrapper: its {} bytes did not decode to a movie, left to its own decoder",
++            payload.len()
++        ),
++    }
++    game
++}
++
++// LZMA "alone" decoder (5 property bytes, 8-byte little-endian size, then the
++// range-coded stream), following LzmaSpec.cpp from the LZMA SDK. The whole
++// output stays in memory, so the dictionary is the output itself.
++
++const PROB_INIT: u16 = 1 << 10;
++const NUM_STATES: usize = 12;
++const POS_BITS_MAX: usize = 4;
++const LEN_TO_POS_STATES: usize = 4;
++const END_POS_MODEL_INDEX: u32 = 14;
++const NUM_FULL_DISTANCES: usize = 1 << (END_POS_MODEL_INDEX >> 1);
++const ALIGN_BITS: u32 = 4;
++const MATCH_MIN_LEN: usize = 2;
++
++struct RangeDecoder<'a> {
++    data: &'a [u8],
++    pos: usize,
++    range: u32,
++    code: u32,
++}
++
++impl<'a> RangeDecoder<'a> {
++    fn new(data: &'a [u8]) -> Option<Self> {
++        if data.len() < 5 || data[0] != 0 {
++            return None;
++        }
++        let code = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
++        if code == u32::MAX {
++            return None;
++        }
++        Some(Self {
++            data,
++            pos: 5,
++            range: u32::MAX,
++            code,
++        })
++    }
++
++    /// Past the end of the input reads zeros; `overrun` catches it afterwards.
++    #[inline(always)]
++    fn normalize(&mut self) {
++        if self.range < (1 << 24) {
++            let byte = self.data.get(self.pos).copied().unwrap_or(0);
++            self.pos += 1;
++            self.range <<= 8;
++            self.code = (self.code << 8) | byte as u32;
++        }
++    }
++
++    fn overrun(&self) -> bool {
++        self.pos > self.data.len()
++    }
++
++    #[inline(always)]
++    fn bit(&mut self, prob: &mut u16) -> usize {
++        let p = *prob as u32;
++        let bound = (self.range >> 11) * p;
++        let bit = if self.code < bound {
++            *prob = (p + (((1 << 11) - p) >> 5)) as u16;
++            self.range = bound;
++            0
++        } else {
++            *prob = (p - (p >> 5)) as u16;
++            self.code -= bound;
++            self.range -= bound;
++            1
++        };
++        self.normalize();
++        bit
++    }
++
++    fn direct_bits(&mut self, count: u32) -> u32 {
++        let mut res = 0u32;
++        for _ in 0..count {
++            self.range >>= 1;
++            self.code = self.code.wrapping_sub(self.range);
++            let t = 0u32.wrapping_sub(self.code >> 31);
++            self.code = self.code.wrapping_add(self.range & t);
++            self.normalize();
++            res = (res << 1).wrapping_add(t.wrapping_add(1));
++        }
++        res
++    }
++
++    /// Bit tree of `log2(N)` bits. The mask keeps indexing check-free.
++    #[inline(always)]
++    fn tree<const N: usize>(&mut self, probs: &mut [u16; N]) -> usize {
++        let mut m = 1usize;
++        while m < N {
++            m = (m << 1) + self.bit(&mut probs[m & (N - 1)]);
++        }
++        m - N
++    }
++
++    fn reverse_tree(&mut self, probs: &mut [u16], bits: u32) -> u32 {
++        let mut m = 1usize;
++        let mut symbol = 0u32;
++        for i in 0..bits {
++            let bit = self.bit(&mut probs[m]);
++            m = (m << 1) + bit;
++            symbol |= (bit as u32) << i;
++        }
++        symbol
++    }
++}
++
++struct LenDecoder {
++    choice: u16,
++    choice2: u16,
++    low: [[u16; 8]; 1 << POS_BITS_MAX],
++    mid: [[u16; 8]; 1 << POS_BITS_MAX],
++    high: [u16; 256],
++}
++
++impl LenDecoder {
++    fn new() -> Self {
++        Self {
++            choice: PROB_INIT,
++            choice2: PROB_INIT,
++            low: [[PROB_INIT; 8]; 1 << POS_BITS_MAX],
++            mid: [[PROB_INIT; 8]; 1 << POS_BITS_MAX],
++            high: [PROB_INIT; 256],
++        }
++    }
++
++    #[inline(always)]
++    fn decode(&mut self, rc: &mut RangeDecoder, pos_state: usize) -> usize {
++        let pos_state = pos_state & ((1 << POS_BITS_MAX) - 1);
++        if rc.bit(&mut self.choice) == 0 {
++            return rc.tree(&mut self.low[pos_state]);
++        }
++        if rc.bit(&mut self.choice2) == 0 {
++            return 8 + rc.tree(&mut self.mid[pos_state]);
++        }
++        16 + rc.tree(&mut self.high)
++    }
++}
++
++/// Decode an LZMA-alone stream whose size is given in its header. `None` on
++/// anything malformed, on an unknown size or one over `max_out`, and when the
++/// heap cannot hold the output.
++fn decode_alone(input: &[u8], max_out: usize) -> Option<Vec<u8>> {
++    if input.len() < 13 {
++        return None;
++    }
++    let props = input[0] as u32;
++    if props >= 9 * 5 * 5 {
++        return None;
++    }
++    let lc = props % 9;
++    let lp = (props / 9) % 5;
++    let pb = props / 45;
++    let dict_size = u32::from_le_bytes([input[1], input[2], input[3], input[4]]).max(1 << 12);
++    let size = u64::from_le_bytes(input[5..13].try_into().ok()?);
++    if size > max_out as u64 {
++        return None;
++    }
++    let size = size as usize;
++    let mut out: Vec<u8> = Vec::new();
++    out.try_reserve_exact(size).ok()?;
++    out.resize(size, 0);
++
++    let mut rc = RangeDecoder::new(&input[13..])?;
++    let mut literal_probs = vec![PROB_INIT; 0x300 << (lc + lp)];
++    let mut is_match = [PROB_INIT; NUM_STATES << POS_BITS_MAX];
++    let mut is_rep = [PROB_INIT; NUM_STATES];
++    let mut is_rep_g0 = [PROB_INIT; NUM_STATES];
++    let mut is_rep_g1 = [PROB_INIT; NUM_STATES];
++    let mut is_rep_g2 = [PROB_INIT; NUM_STATES];
++    let mut is_rep0_long = [PROB_INIT; NUM_STATES << POS_BITS_MAX];
++    let mut pos_slot = [[PROB_INIT; 1 << 6]; LEN_TO_POS_STATES];
++    let mut pos_decoders = [PROB_INIT; 1 + NUM_FULL_DISTANCES - END_POS_MODEL_INDEX as usize];
++    let mut align = [PROB_INIT; 1 << ALIGN_BITS];
++    let mut len_decoder = LenDecoder::new();
++    let mut rep_len_decoder = LenDecoder::new();
++
++    let pb_mask = (1usize << pb) - 1;
++    let lp_mask = (1usize << lp) - 1;
++    let (mut rep0, mut rep1, mut rep2, mut rep3) = (0usize, 0usize, 0usize, 0usize);
++    let mut state = 0usize;
++    // Bytes written so far: `out[..n]` is the dictionary.
++    let mut n = 0usize;
++
++    while n < size {
++        if rc.overrun() {
++            return None;
++        }
++        let pos_state = n & pb_mask;
++        let state_pos = (state << POS_BITS_MAX) + pos_state;
++        if rc.bit(&mut is_match[state_pos]) == 0 {
++            let prev = if n > 0 { out[n - 1] as usize } else { 0 };
++            let lit_state = ((n & lp_mask) << lc) + (prev >> (8 - lc));
++            let probs: &mut [u16; 0x300] = (&mut literal_probs
++                [0x300 * lit_state..0x300 * (lit_state + 1)])
++                .try_into()
++                .ok()?;
++            let mut symbol = 1usize;
++            if state >= 7 {
++                let mut match_byte = out[n - rep0 - 1] as usize;
++                while symbol < 0x100 {
++                    let match_bit = (match_byte >> 7) & 1;
++                    match_byte <<= 1;
++                    let bit = rc.bit(&mut probs[0x100 + (match_bit << 8) + (symbol & 0xff)]);
++                    symbol = (symbol << 1) | bit;
++                    if match_bit != bit {
++                        break;
++                    }
++                }
++            }
++            while symbol < 0x100 {
++                symbol = (symbol << 1) | rc.bit(&mut probs[symbol & 0xff]);
++            }
++            out[n] = symbol as u8;
++            n += 1;
++            state = if state < 4 {
++                0
++            } else if state < 10 {
++                state - 3
++            } else {
++                state - 6
++            };
++            continue;
++        }
++
++        let st = state % NUM_STATES;
++        let len;
++        if rc.bit(&mut is_rep[st]) != 0 {
++            if n == 0 {
++                return None;
++            }
++            if rc.bit(&mut is_rep_g0[st]) == 0 {
++                if rc.bit(&mut is_rep0_long[state_pos]) == 0 {
++                    state = if st < 7 { 9 } else { 11 };
++                    out[n] = out[n - rep0 - 1];
++                    n += 1;
++                    continue;
++                }
++            } else {
++                let dist;
++                if rc.bit(&mut is_rep_g1[st]) == 0 {
++                    dist = rep1;
++                } else {
++                    if rc.bit(&mut is_rep_g2[st]) == 0 {
++                        dist = rep2;
++                    } else {
++                        dist = rep3;
++                        rep3 = rep2;
++                    }
++                    rep2 = rep1;
++                }
++                rep1 = rep0;
++                rep0 = dist;
++            }
++            len = rep_len_decoder.decode(&mut rc, pos_state);
++            state = if st < 7 { 8 } else { 11 };
++        } else {
++            rep3 = rep2;
++            rep2 = rep1;
++            rep1 = rep0;
++            len = len_decoder.decode(&mut rc, pos_state);
++            state = if st < 7 { 7 } else { 10 };
++            let slot = rc.tree(&mut pos_slot[len.min(LEN_TO_POS_STATES - 1)]) as u32;
++            let dist = if slot < 4 {
++                slot
++            } else {
++                let direct = (slot >> 1) - 1;
++                let base = (2 | (slot & 1)) << direct;
++                if slot < END_POS_MODEL_INDEX {
++                    let start = (base - slot) as usize;
++                    base + rc.reverse_tree(&mut pos_decoders[start..], direct)
++                } else {
++                    let high = rc.direct_bits(direct - ALIGN_BITS) << ALIGN_BITS;
++                    base.wrapping_add(high)
++                        .wrapping_add(rc.reverse_tree(&mut align, ALIGN_BITS))
++                }
++            };
++            // u32::MAX is the end marker, which cannot come before the size
++            // given in the header is reached.
++            rep0 = dist as usize;
++            if dist == u32::MAX || rep0 >= dict_size as usize || rep0 >= n {
++                return None;
++            }
++        }
++        let len = len + MATCH_MIN_LEN;
++        if len > size - n {
++            return None;
++        }
++        let start = n - rep0 - 1;
++        if rep0 + 1 >= len {
++            out.copy_within(start..start + len, n);
++        } else {
++            for i in 0..len {
++                out[n + i] = out[start + i];
++            }
++        }
++        n += len;
++    }
++    (!rc.overrun()).then_some(out)
++}
+diff --git a/core/common/src/lib.rs b/core/common/src/lib.rs
+index 2b0525c92..c531d0255 100644
+--- a/core/common/src/lib.rs
++++ b/core/common/src/lib.rs
+@@ -3,6 +3,7 @@
+ pub mod avm_string;
+ pub mod buffer;
+ pub mod duration;
++mod flashnx_matryoshka;
+ pub mod sandbox;
+ pub mod tag_utils;
+ pub mod utils;
 diff --git a/core/common/src/tag_utils.rs b/core/common/src/tag_utils.rs
-index 371775c28..7beba9de2 100644
+index 371775c28..608fb53d9 100644
 --- a/core/common/src/tag_utils.rs
 +++ b/core/common/src/tag_utils.rs
 @@ -17,7 +17,7 @@ pub struct SwfMovie {
@@ -243,13 +659,21 @@ index 371775c28..7beba9de2 100644
              url: movie_url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -156,13 +300,14 @@ impl SwfMovie {
+@@ -156,13 +300,22 @@ impl SwfMovie {
          url: String,
          loader_url: Option<String>,
      ) -> Result<Self, swf::error::Error> {
 +        note_made(4);
          let compressed_len = swf_data.len();
          let swf_buf = swf::read::decompress_swf(swf_data)?;
++        // FlashNX: an apparat Matryoshka wrapper becomes the game it carries
++        // (see `flashnx_matryoshka`).
++        if let Some(game) =
++            crate::flashnx_matryoshka::unwrap(&swf_buf.data, swf_buf.header.is_action_script_3())
++        {
++            drop(swf_buf);
++            return Self::from_data(&game, url, loader_url);
++        }
          let encoding = swf::SwfStr::encoding_for_version(swf_buf.header.version());
          let sandbox_type = SandboxType::infer(url.as_str(), &swf_buf.header);
          let mut movie = Self {
@@ -259,7 +683,7 @@ index 371775c28..7beba9de2 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -176,8 +321,32 @@ impl SwfMovie {
+@@ -176,8 +329,32 @@ impl SwfMovie {
          Ok(movie)
      }
  
@@ -292,7 +716,7 @@ index 371775c28..7beba9de2 100644
          let stage_size = Rectangle::ZERO
              .with_width(Twips::from_pixels_i32(width as i32))
              .with_height(Twips::from_pixels_i32(height as i32));
-@@ -185,7 +354,7 @@ impl SwfMovie {
+@@ -185,7 +362,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &header);
          let mut movie = Self {
              header,
@@ -301,7 +725,7 @@ index 371775c28..7beba9de2 100644
              url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -225,7 +394,7 @@ impl SwfMovie {
+@@ -225,7 +402,7 @@ impl SwfMovie {
      }
  
      pub fn data(&self) -> &[u8] {
@@ -310,7 +734,7 @@ index 371775c28..7beba9de2 100644
      }
  
      /// Returns the suggested string encoding for the given SWF version.
-@@ -319,7 +488,7 @@ impl Debug for SwfMovie {
+@@ -319,7 +496,7 @@ impl Debug for SwfMovie {
      fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
          f.debug_struct("SwfMovie")
              .field("header", &self.header)

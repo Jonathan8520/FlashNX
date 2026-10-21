@@ -446,6 +446,30 @@ rejected methods (28 try/catch, and two that pass the switch but exceed
 1 MB of code, `bad branch`, interpreted as before), no deopt, no script
 error in a session of play.
 
+**`core/common/src/flashnx_matryoshka.rs`, `tag_utils.rs`, `lib.rs`: movies
+packed with apparat's Matryoshka are unpacked natively (FlashNX #136).**
+
+Matryoshka is a small AS3 movie that LZMA-decodes the real game, embedded as
+the `DefineBinaryData` bound to `MatryoshkaContent_byteArrayAsset`, with a
+decoder written in ActionScript (`apparat.lzma.LZMADecoder`), then
+`loadBytes` it. Ruffle does not finish that decoder within the script time
+limit, on PC either (ruffle#16026, Super Mario Bros. Crossover; ruffle#20355,
+Glorg). `SwfMovie::from_data` now returns the decoded game in place of the
+wrapper, so it covers the movie launched (Glorg) as well as one loaded by
+another movie (Super Mario Bros. Crossover's Flex preloader loads it with
+`loadBytes`). Detection reads tag headers only, in AS3 movies only: a
+SymbolClass link with that exact name, bound to a binary that starts like an
+LZMA-alone stream. The result must start with FWS, CWS or ZWS; otherwise the
+wrapper runs as before. The decoder follows LzmaSpec.cpp (LZMA SDK) with the
+whole output as its dictionary, sizes from the stream header only: on PC
+0.75 s for SMBC's 42.7 MB (lzma-rs 1.2 s, and Ruffle's `lzma` feature stays
+off), output identical to liblzma's for both games, truncated and corrupted
+payloads refused. On the console: 1.9 s for SMBC, 0.87 s for Glorg, which
+then plays at full speed (v2.0.2 stopped its script after 60 s and it stayed
+on its "decrunching" screen for good). SMBC gets past its loading screen and stops later,
+on the speed of its FlasCC-compiled music emulator (libgme): about 130 s of
+ActionScript to record its sound effects at startup, cut by the 60 s limit.
+
 **Super Smash Flash 2, October 2026: memory and speed.** Measured on the
 console over a dozen sessions; the full suite (host build, GNU toolchain)
 passes 4063 tests with the same two known failures after each step. The
