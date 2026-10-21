@@ -424,6 +424,14 @@
     "verified": false
   },
   {
+    "id": "hobo-4aa42edc-b35ff69b",
+    "title": "Hobo",
+    "fp_uuid": "",
+    "swf_hash": "4aa42edc6d1d4af9",
+    "file": "hobo/hobo-4aa42edc-b35ff69b.profile.json",
+    "verified": false
+  },
+  {
     "id": "hobo-prison-brawl-7e95ce7a-a6142c8e",
     "title": "Hobo Prison Brawl",
     "fp_uuid": "",
