@@ -743,6 +743,162 @@ index 371775c28..608fb53d9 100644
              .field("url", &self.url)
              .field("loader_url", &self.loader_url)
              .field("parameters", &self.parameters)
+diff --git a/core/common/src/xml.rs b/core/common/src/xml.rs
+index a3f8c2b93..25d33e2b7 100644
+--- a/core/common/src/xml.rs
++++ b/core/common/src/xml.rs
+@@ -1,47 +1,62 @@
+ use quick_xml::escape::EscapeError as XmlEscapeError;
+-use regress::Regex;
+ use std::str::Utf8Error;
+-use std::sync::LazyLock;
+ 
+-// Matches XML entities like &amp; or &#39; or &#x1F600;
+-// We exclude both ';' and '&' from the middle to avoid matching across multiple
+-// ampersands - e.g. in "& &thing;" we want to match only "&thing;", not "& &thing;"
+-static AVM1_ENTITY_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"&[^;&]*;").unwrap());
++// FlashNX: the entities used to be found with regular expressions,
++// `&[^;&]*;` (AVM1) and `&[^;]*;` (AVM2), on the regress backtracking engine.
++// On a text with many '&' and no ';' after them, every '&' ran its `[^;]*`
++// to the end of the text and backtracked all the way: quadratic. Super Mario
++// Bros. Crossover parses its three level files at startup, 7.75 MB of map
++// text with 320 000 '&' ("groundBlock&&HideOnDifficulties=...") and no ';':
++// 65.8 s on a PC that way, 7.8 ms with `next_entity`, and 81 % of the
++// console's samples of its startup were in that expression (#136, upstream
++// ruffle#21623). `next_entity` finds the very same spans in one pass (see
++// the test below).
+ 
+-// AVM2's E4X parser does not decode entities preceded by a bare '&',
+-// e.g. "&&amp;" is preserved as-is rather than decoded to "&&".
+-// We achieve this by only excluding ';' from the middle, so "&&amp;" is
+-// matched as a single entity, which fails to decode and is preserved.
+-static AVM2_ENTITY_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"&[^;]*;").unwrap());
++/// The next span the old expression matched, from `from` on: `&`, then up to
++/// the first `;`; for AVM1 a `&` before that `;` starts the span over.
++/// `None` when no `;` follows any more (then nothing further can match).
++/// '&' and ';' are ASCII, so they never occur inside a multibyte UTF-8
++/// character: byte positions are character boundaries.
++fn next_entity(bytes: &[u8], mut from: usize, avm1: bool) -> Option<(usize, usize)> {
++    loop {
++        let start = from + bytes[from..].iter().position(|&b| b == b'&')?;
++        let rel = bytes[start + 1..]
++            .iter()
++            .position(|&b| b == b';' || (avm1 && b == b'&'))?;
++        let at = start + 1 + rel;
++        if bytes[at] == b';' {
++            return Some((start, at + 1));
++        }
++        from = at;
++    }
++}
+ 
+ /// AVM1 XML unescaping. Decodes entities individually, even when
+ /// preceded by a bare '&' (e.g. "&&amp;" becomes "&&").
+ pub fn avm1_unescape(input: &[u8]) -> Result<String, Utf8Error> {
+-    custom_unescape(input, &AVM1_ENTITY_REGEX)
++    custom_unescape(input, true)
+ }
+ 
+ /// AVM2 E4X XML unescaping. Does not decode entities preceded by a
+ /// bare '&' (e.g. "&&amp;" is preserved as "&&amp;").
+ pub fn avm2_unescape(input: &[u8]) -> Result<String, Utf8Error> {
+-    custom_unescape(input, &AVM2_ENTITY_REGEX)
++    custom_unescape(input, false)
+ }
+ 
+ /// Handles flash-specific XML unescaping behavior.
+ /// We accept all XML entities, and also accept standalone '&' without
+ /// a corresponding ';'
+-fn custom_unescape(input: &[u8], entity_regex: &Regex) -> Result<String, Utf8Error> {
++fn custom_unescape(input: &[u8], avm1: bool) -> Result<String, Utf8Error> {
+     let input = std::str::from_utf8(input)?;
++    let bytes = input.as_bytes();
+ 
+     let mut result = String::new();
+     let mut last_end = 0;
+ 
+     // Find all entities, and try to unescape them.
+-    // Our regular expression will skip over '&' without a matching ';',
+-    // which will preserve them as-is in the output
+-    for cap in entity_regex.find_iter(input) {
+-        let start = cap.start();
+-        let end = cap.end();
+-
++    // A '&' without a matching ';' is skipped over, which preserves it
++    // as-is in the output.
++    while let Some((start, end)) = next_entity(bytes, last_end, avm1) {
+         result.push_str(&input[last_end..start]);
+ 
+         let entity = &input[start..end];
+@@ -50,8 +65,8 @@ fn custom_unescape(input: &[u8], entity_regex: &Regex) -> Result<String, Utf8Err
+         match quick_xml::escape::unescape(entity) {
+             Ok(decoded) => result.push_str(&decoded),
+             // Unknown or malformed entities are preserved as-is.
+-            // The AVM2 regex can match strings like "&&amp;" which contain
+-            // multiple '&' characters, causing unescape to report UnterminatedEntity
++            // The AVM2 span can be like "&&amp;", with multiple '&'
++            // characters, causing unescape to report UnterminatedEntity
+             // for the first '&' before it reaches the ';'.
+             Err(
+                 XmlEscapeError::InvalidCharRef(_)
+@@ -67,3 +82,57 @@ fn custom_unescape(input: &[u8], entity_regex: &Regex) -> Result<String, Utf8Err
+ 
+     Ok(result)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::next_entity;
++    use regress::Regex;
++
++    /// Every span the old expressions found, the same as `next_entity`'s.
++    fn spans_regex(input: &str, avm1: bool) -> Vec<(usize, usize)> {
++        let re = Regex::new(if avm1 { r"&[^;&]*;" } else { r"&[^;]*;" }).unwrap();
++        re.find_iter(input).map(|m| (m.start(), m.end())).collect()
++    }
++
++    fn spans_scan(input: &str, avm1: bool) -> Vec<(usize, usize)> {
++        let mut out = Vec::new();
++        let mut from = 0;
++        while let Some((s, e)) = next_entity(input.as_bytes(), from, avm1) {
++            out.push((s, e));
++            from = e;
++        }
++        out
++    }
++
++    #[test]
++    fn same_spans_as_the_expressions() {
++        let mut cases: Vec<String> = [
++            "", "&", ";", "&;", "&&;", "&amp;", "a&amp;b", "&&amp;", "& &thing;", "&a&b;c;",
++            "x&y", "&a=1&b=2", "&lt;&gt;&#39;&#x1F600;", "é&amp;ü&;", "&;&;&", ";;&&;;",
++            "&\n;", "a&b&c&d;e&f", "&&&&", "&é;&ü&ö;",
++        ]
++        .iter()
++        .map(|s| s.to_string())
++        .collect();
++        // Every string of up to 7 characters over a small alphabet.
++        let alphabet = ['&', ';', 'a', 'é'];
++        let mut frontier = vec![String::new()];
++        for _ in 0..7 {
++            let mut next = Vec::new();
++            for s in &frontier {
++                for c in alphabet {
++                    let mut t = s.clone();
++                    t.push(c);
++                    next.push(t);
++                }
++            }
++            cases.extend(next.iter().cloned());
++            frontier = next;
++        }
++        for case in &cases {
++            for avm1 in [false, true] {
++                assert_eq!(spans_scan(case, avm1), spans_regex(case, avm1), "{case:?} avm1={avm1}");
++            }
++        }
++    }
++}
 diff --git a/core/src/avm1.rs b/core/src/avm1.rs
 index 3bd126464..1a8cb8082 100644
 --- a/core/src/avm1.rs
@@ -1410,7 +1566,7 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..cc6620d6f 100644
+index ed1ff3034..01e366f33 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -1423,7 +1579,7 @@ index ed1ff3034..cc6620d6f 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,117 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,126 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -1492,6 +1648,15 @@ index ed1ff3034..cc6620d6f 100644
 +    let _ = on;
 +}
 +
++/// FlashNX: compiled code's paths for CrossBridge code (on by default;
++/// `jitcb.off`), see `activation_jit::set_crossbridge`.
++pub fn set_jit_crossbridge(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_crossbridge(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
 +/// FlashNX, profiling build: compile every method a second time without the
 +/// stack cache (`dual`), and run that second code (`alt`) in the A/B's other
 +/// windows.
@@ -1541,7 +1706,7 @@ index ed1ff3034..cc6620d6f 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +247,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +256,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -1550,7 +1715,7 @@ index ed1ff3034..cc6620d6f 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +271,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +280,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -1559,7 +1724,7 @@ index ed1ff3034..cc6620d6f 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +326,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +335,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -1575,7 +1740,7 @@ index ed1ff3034..cc6620d6f 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +460,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +469,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -1600,7 +1765,7 @@ index ed1ff3034..cc6620d6f 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +562,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +571,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -1609,7 +1774,7 @@ index ed1ff3034..cc6620d6f 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +643,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +652,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -1626,7 +1791,7 @@ index ed1ff3034..cc6620d6f 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +777,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +786,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -1650,7 +1815,7 @@ index ed1ff3034..cc6620d6f 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +801,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +810,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -1666,7 +1831,7 @@ index ed1ff3034..cc6620d6f 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,12 +1099,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,12 +1108,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -1689,7 +1854,7 @@ index ed1ff3034..cc6620d6f 100644
          }
          Ok(())
      }
-@@ -2023,6 +2185,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2194,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -1700,7 +1865,7 @@ index ed1ff3034..cc6620d6f 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2238,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2247,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -1711,14 +1876,14 @@ index ed1ff3034..cc6620d6f 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
 +            (value1, value2) => {
 +                let value1 = value1.coerce_to_i32(self)?;
 +                let value2 = value2.coerce_to_i32(self)?;
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +                value1.wrapping_add(value2)
 +            }
 +        };
@@ -1727,7 +1892,7 @@ index ed1ff3034..cc6620d6f 100644
  
          Ok(())
      }
-@@ -2134,8 +2312,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2321,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1738,7 +1903,7 @@ index ed1ff3034..cc6620d6f 100644
  
          Ok(())
      }
-@@ -2151,8 +2330,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2339,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1749,7 +1914,7 @@ index ed1ff3034..cc6620d6f 100644
  
          Ok(())
      }
-@@ -2175,8 +2355,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2364,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1760,7 +1925,7 @@ index ed1ff3034..cc6620d6f 100644
  
          Ok(())
      }
-@@ -2274,6 +2455,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2464,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1769,7 +1934,7 @@ index ed1ff3034..cc6620d6f 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2471,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2480,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -1795,10 +1960,10 @@ index ed1ff3034..cc6620d6f 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..5686a1983
+index 000000000..7164463c5
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1948 @@
+@@ -0,0 +1,2381 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1867,6 +2032,8 @@ index 000000000..5686a1983
 +const CODE_SIZE: usize = 16 << 20;
 +/// Helper table: 0..KINDS = `h_op::<K>`, then the special helpers.
 +const KINDS: usize = 160;
++/// Domain memory view for the inline `li*` / `si*` ops (`h_dm`).
++const H_DM: usize = 246;
 +/// `lookupswitch`'s index (`h_switch`).
 +const H_SWITCH: usize = 247;
 +const H_ARRAY_GET: usize = 248;
@@ -1898,6 +2065,15 @@ index 000000000..5686a1983
 +    TOS_CACHE.store(on, AtomicOrdering::Relaxed);
 +}
 +
++/// The paths written for CrossBridge (FlasCC) code: domain memory and int
++/// ops inline, `getscopeobject` of `this` as local 0, `setslot` of an int,
++/// direct calls to bound methods. Off from the `jitcb.off` marker.
++static CROSSBRIDGE: AtomicBool = AtomicBool::new(true);
++
++pub fn set_crossbridge(on: bool) {
++    CROSSBRIDGE.store(on, AtomicOrdering::Relaxed);
++}
++
 +pub fn set_dual(on: bool) {
 +    DUAL.store(on, AtomicOrdering::Relaxed);
 +}
@@ -1917,18 +2093,38 @@ index 000000000..5686a1983
 +
 +type Act = Activation<'static, 'static>;
 +
-+/// What the compiled code and the helpers share. Only `frame` and `helpers`
-+/// are read by machine code (offsets 0 and 8).
++/// What the compiled code and the helpers share. Machine code reads the
++/// first six fields, at the `CTX_*` offsets.
 +#[repr(C)]
 +struct Ctx {
 +    frame: *mut Value<'static>,
 +    helpers: *const usize,
++    /// This activation's domain memory as `h_dm` last saw it: its bytes,
++    /// their length, and the value of `FLASHNX_BYTES_GEN` then (`u64::MAX`:
++    /// not taken yet). The inline `li*` / `si*` use it while the counter, read
++    /// through `gen_ptr`, has not moved.
++    dm_ptr: *mut u8,
++    dm_len: usize,
++    dm_gen: u64,
++    gen_ptr: *const u64,
++    /// Backward branches left before the next `h_timeout` (`poll_timeout`).
++    poll: u32,
 +    act: *mut Act,
 +    ops: *const Op<'static>,
 +    num_locals: usize,
 +    result: Option<Result<Value<'static>, Error<'static>>>,
 +    resume_ip: usize,
 +}
++
++const CTX_DM_PTR: usize = 16;
++const CTX_DM_LEN: usize = 24;
++const CTX_DM_GEN: usize = 32;
++const CTX_GEN: usize = 40;
++const CTX_POLL: usize = 48;
++
++/// A backward branch calls `h_timeout` once in this many, which counts them
++/// all for `timeout_check` (see `h_timeout`).
++const POLL_EVERY: u32 = 64;
 +
 +pub(super) enum Outcome<'gc> {
 +    Done(Result<Value<'gc>, Error<'gc>>),
@@ -1952,6 +2148,13 @@ index 000000000..5686a1983
 +    /// `callmethod` from compiled code: entered directly / through `exec`.
 +    calls_direct: u64,
 +    calls_slow: u64,
++    /// `h_dm`: domain memory views taken, and refused (bytes borrowed).
++    dm_views: u64,
++    dm_refused: u64,
++    /// Why `fast_call` handed a call to the interpreter's path (`SLOW_WHY`),
++    /// and the callees of one call in 1024 of each kind, by name.
++    slow_why: [u64; SLOW_WHY.len()],
++    slow_names: FnvHashMap<String, u64>,
 +    layout: Layout,
 +    /// Where each compiled op's code starts (address, op name), kept only
 +    /// when `set_map` asked for it: the profiling build's attribution of
@@ -2009,6 +2212,11 @@ index 000000000..5686a1983
 +    num_off: usize,
 +    int_tag: u8,
 +    int_off: usize,
++    /// First 8 bytes of a `Value::Integer` / `Value::Number` (the tag), for a
++    /// result written over an operand of another type (`words_ok`).
++    int_word: u64,
++    num_word: u64,
++    words_ok: bool,
 +    /// `Value::Object`: tags of the object types checked so far, and where the
 +    /// slots' pointer and length are from the `Gc` box pointer at byte 8.
 +    obj_tags: Vec<u8>,
@@ -2022,6 +2230,12 @@ index 000000000..5686a1983
 +    header_probed: bool,
 +    vtable_word: usize,
 +}
++
++/// The reasons `fast_call` counts (`State::slow_why`).
++const SLOW_WHY: [&str; 11] = [
++    "off", "receiver", "bound", "no method", "native", "rejected", "not compiled yet", "arguments",
++    "no body", "arity", "argument type",
++];
 +
 +static mut STATE: Option<State> = None;
 +
@@ -2044,6 +2258,10 @@ index 000000000..5686a1983
 +            runs: 0,
 +            calls_direct: 0,
 +            calls_slow: 0,
++            dm_views: 0,
++            dm_refused: 0,
++            slow_why: [0; SLOW_WHY.len()],
++            slow_names: FnvHashMap::default(),
 +            layout: Layout::default(),
 +            map: Vec::new(),
 +            #[cfg(feature = "flashnx_instr")]
@@ -2140,7 +2358,11 @@ index 000000000..5686a1983
 +    l.num_off = num_off;
 +    l.int_tag = i[0];
 +    l.int_off = int_off;
++    l.int_word = bytes_of(Value::Integer(0))[0];
++    l.num_word = bytes_of(Value::Number(0.0))[0];
 +    l.num_ok = l.bool_ok && l.bool_off >= 8;
++    // A tag word can only be written alone with the payloads past it.
++    l.words_ok = l.num_ok && num_off >= 8 && int_off >= 8;
 +}
 +
 +/// Where the GC color lives in a box header: two fresh objects of the same
@@ -2252,7 +2474,9 @@ index 000000000..5686a1983
 +const EQ: u32 = 0;
 +const NE: u32 = 1;
 +const MI: u32 = 4;
++const PL: u32 = 5;
 +const VS: u32 = 6;
++const HI: u32 = 8;
 +const LS: u32 = 9;
 +const GE: u32 = 10;
 +const LT: u32 = 11;
@@ -2263,6 +2487,19 @@ index 000000000..5686a1983
 +    code: Vec<u32>,
 +    fixups: Vec<(usize, Target, Fix)>,
 +}
++
++// Register-offset loads and stores (`mem_reg`): ldrb / ldrh / ldr w / ldr s /
++// ldr d, then the stores, of `[xn, xm]`.
++const MEM_LDRB: u32 = 0x3860_6800;
++const MEM_LDRH: u32 = 0x7860_6800;
++const MEM_LDR_W: u32 = 0xB860_6800;
++const MEM_LDR_S: u32 = 0xBC60_6800;
++const MEM_LDR_D: u32 = 0xFC60_6800;
++const MEM_STRB: u32 = 0x3820_6800;
++const MEM_STRH: u32 = 0x7820_6800;
++const MEM_STR_W: u32 = 0xB820_6800;
++const MEM_STR_S: u32 = 0xBC20_6800;
++const MEM_STR_D: u32 = 0xFC20_6800;
 +
 +const X0: u32 = 0;
 +const X16: u32 = 16;
@@ -2325,6 +2562,30 @@ index 000000000..5686a1983
 +    /// cset w<rd>, cond
 +    fn cset(&mut self, rd: u32, cond: u32) {
 +        self.e(0x1A9F_07E0 | (cond ^ 1) << 12 | rd);
++    }
++    /// cmp x<rn>, x<rm>
++    fn cmp_xx(&mut self, rn: u32, rm: u32) {
++        self.e(0xEB00_001F | rm << 16 | rn << 5);
++    }
++    /// add x<rd>, x<rn>, #imm (imm < 4096)
++    fn add_xi(&mut self, rd: u32, rn: u32, imm: u32) {
++        self.e(0x9100_0000 | imm << 10 | rn << 5 | rd);
++    }
++    /// Every backward branch: the script time limit and the pause, through
++    /// `h_timeout` once in `POLL_EVERY` times. A helper call on every one was
++    /// ~2.5 % of Super Mario Bros. Crossover's startup (CrossBridge loops).
++    fn poll_timeout(&mut self) {
++        self.ldr_w(9, X21, CTX_POLL);
++        self.e(0x7100_0529); // subs w9, w9, #1
++        self.str_w(9, X21, CTX_POLL);
++        let skip = self.fwd(Fix::BCond(PL));
++        self.call(H_TIMEOUT, 0, 0, 0, true);
++        let here = self.here();
++        self.set(skip, here);
++    }
++    /// A load or store `<op> <rt>, [x<rn>, x<rm>]`, `op` one of the `MEM_*`.
++    fn mem_reg(&mut self, op: u32, rt: u32, rn: u32, rm: u32) {
++        self.e(op | rm << 16 | rn << 5 | rt);
 +    }
 +    fn here(&self) -> usize {
 +        self.code.len()
@@ -2599,9 +2860,11 @@ index 000000000..5686a1983
 +    }
 +    let lay = s.layout.clone();
 +    let cache = TOS_CACHE.load(AtomicOrdering::Relaxed);
-+    let (main, main_labels, main_exit) = emit(&lay, ops, &depth, &target, nl, cache)?;
++    let cb = CROSSBRIDGE.load(AtomicOrdering::Relaxed);
++    let scopes = if cb { this_scopes(ops) } else { 0 };
++    let (main, main_labels, main_exit) = emit(&lay, ops, &depth, &target, nl, cache, scopes, cb)?;
 +    let alt = if DUAL.load(AtomicOrdering::Relaxed) {
-+        Some(emit(&lay, ops, &depth, &target, nl, false)?)
++        Some(emit(&lay, ops, &depth, &target, nl, false, scopes, cb)?)
 +    } else {
 +        None
 +    };
@@ -2632,12 +2895,54 @@ index 000000000..5686a1983
 +        s.kind_names.entry(kind(op)).or_insert_with(|| op_name(op));
 +    }
 +    if MAP.load(AtomicOrdering::Relaxed) {
++        // The method's name too, on a line of its own that `jit_ops.py`
++        // skips (it reads `<address> <op>` pairs): `jit_methods.py` attributes
++        // the samples of compiled code to methods with it.
++        let mut name = crate::string::WString::new();
++        crate::avm2::function::display_function(&mut name, method);
++        let name = name.to_utf8_lossy().replace(char::is_whitespace, "_");
++        s.map.push((addr, format!("@ {name}")));
 +        push_map(s, addr, ops, &depth, &main_labels, main_exit);
 +        if let Some((_, labels, exit)) = &alt {
++            s.map.push((alt_addr, format!("@ {name}")));
 +            push_map(s, alt_addr, ops, &depth, labels, *exit);
 +        }
 +    }
 +    Ok(addr)
++}
++
++/// How many of the method's own scopes are its `this`, so that
++/// `getscopeobject` below that index reads local 0. CrossBridge (FlasCC)
++/// functions start with `getlocal0, dup, pushscope, pushscope` and reach
++/// their globals (`ESP`, the functions they call) through those scopes: one
++/// helper per access otherwise, 30 million in Super Mario Bros. Crossover's
++/// sound recording. Upstream does the same in its optimizer (ruffle#24236).
++/// Only when the prologue holds the method's only scope ops and local 0 is
++/// never written.
++fn this_scopes(ops: &[Op<'_>]) -> usize {
++    let (n, prologue) = match ops {
++        [Op::GetLocal { index: 0 }, Op::PushScope, ..] => (1, 2),
++        [Op::GetLocal { index: 0 }, Op::Dup, Op::PushScope, Op::PushScope, ..] => (2, 4),
++        _ => return 0,
++    };
++    let writes_this = |op: &Op<'_>| match op {
++        Op::SetLocal { index }
++        | Op::StoreLocal { index }
++        | Op::Kill { index }
++        | Op::IncLocal { index }
++        | Op::IncLocalI { index }
++        | Op::DecLocal { index }
++        | Op::DecLocalI { index } => *index == 0,
++        Op::HasNext2 { object_register, index_register } => *object_register == 0 || *index_register == 0,
++        _ => false,
++    };
++    if ops[prologue..]
++        .iter()
++        .any(|op| matches!(op, Op::PushScope | Op::PushWith | Op::PopScope) || writes_this(op))
++    {
++        return 0;
++    }
++    n
 +}
 +
 +fn push_map(s: &mut State, addr: usize, ops: &[Op<'_>], depth: &[u32], labels: &[usize], exit: usize) {
@@ -2697,9 +3002,12 @@ index 000000000..5686a1983
 +    target: &[bool],
 +    nl: usize,
 +    cache: bool,
++    this_scopes: usize,
++    cb: bool,
 +) -> Result<(Vec<u32>, Vec<usize>, usize), String> {
 +    let n = ops.len();
 +    let slot = |d: usize| (nl + d) * 16;
++    let local0 = Op::GetLocal { index: 0 };
 +    let mut a = Asm {
 +        code: Vec::with_capacity(n * 4 + 16),
 +        fixups: Vec::new(),
@@ -2720,7 +3028,10 @@ index 000000000..5686a1983
 +            tos = Tos::Mem;
 +        }
 +        labels[i] = a.code.len();
-+        let op = &ops[i];
++        let op = match &ops[i] {
++            Op::GetScopeObject { index } if (*index as usize) < this_scopes => &local0,
++            op => op,
++        };
 +        let consumer = cache
 +            && match op {
 +                Op::GetLocal { .. } | Op::SetLocal { .. } | Op::StoreLocal { .. } | Op::Pop => true,
@@ -2791,7 +3102,7 @@ index 000000000..5686a1983
 +            }
 +            Op::Jump { offset } | Op::PopJump { offset } => {
 +                if *offset <= i {
-+                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                    a.poll_timeout();
 +                }
 +                a.branch(Fix::B, Target::Op(*offset));
 +            }
@@ -2804,7 +3115,7 @@ index 000000000..5686a1983
 +                let cases: std::vec::Vec<usize> = ls.case_offsets.iter().map(|c| c.get()).collect();
 +                let default = ls.default_offset.get();
 +                if cases.iter().any(|&t| t <= i) || default <= i {
-+                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                    a.poll_timeout();
 +                }
 +                a.call(H_SWITCH, d, 0, 0, false);
 +                for (k, &t) in cases.iter().enumerate() {
@@ -2815,7 +3126,7 @@ index 000000000..5686a1983
 +            }
 +            Op::IfTrue { offset } | Op::IfFalse { offset } => {
 +                if *offset <= i {
-+                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                    a.poll_timeout();
 +                }
 +                let nz = matches!(op, Op::IfTrue { .. });
 +                let top = slot(d - 1);
@@ -2912,8 +3223,30 @@ index 000000000..5686a1983
 +                        }
 +                    }
 +                    // Overflow: the interpreter's answer is a Number.
-+                    to_slow.push(a.fwd(Fix::BCond(if matches!(op, Op::Multiply) { NE } else { VS })));
++                    let ovf = a.fwd(Fix::BCond(if matches!(op, Op::Multiply) { NE } else { VS }));
 +                    a.str_w(10, X19, v1 + lay.int_off);
++                    to_done.push(a.fwd(Fix::B));
++                    if cb && lay.words_ok {
++                        // The same Number in place, as the interpreter makes
++                        // it: the ints as doubles (exact), then added,
++                        // subtracted (exact: the i64 result) or multiplied.
++                        let here = a.here();
++                        a.set(ovf, here);
++                        a.ldr_w(10, X19, v1 + lay.int_off);
++                        a.ldr_w(11, X19, v2 + lay.int_off);
++                        a.e(0x1E62_0140); // scvtf d0, w10
++                        a.e(0x1E62_0161); // scvtf d1, w11
++                        a.e(match op {
++                            Op::Add => 0x1E60_2800,
++                            Op::Subtract => 0x1E60_3800,
++                            _ => 0x1E60_0800,
++                        } | 1 << 16); // fadd / fsub / fmul d0, d0, d1
++                        let r = a.mov_x(9, lay.num_word);
++                        a.str_x(r, X19, v1);
++                        a.str_d(0, X19, v1 + lay.num_off);
++                    } else {
++                        to_slow.push(ovf);
++                    }
 +                }
 +                to_done.push(a.fwd(Fix::B));
 +                let slow = a.here();
@@ -3028,13 +3361,25 @@ index 000000000..5686a1983
 +            Op::GetPropertyFast { multiname } if multiname.has_lazy_name() && !multiname.has_lazy_ns() => {
 +                a.call(H_ARRAY_GET, d, i, d - 1, true);
 +            }
-+            Op::SetSlotNoCoerce { index }
-+                if lay.header_ok && !lay.obj_tags.is_empty() && slot(d - 1) + 16 < 4096 && *index < 4096 =>
++            Op::SetSlotNoCoerce { index } | Op::SetSlotCoerceI { index }
++                if lay.header_ok
++                    && !lay.obj_tags.is_empty()
++                    && slot(d - 1) + 16 < 4096
++                    && *index < 4096
++                    && (matches!(op, Op::SetSlotNoCoerce { .. }) || (cb && lay.words_ok)) =>
 +            {
 +                // Object of a checked type, not black for the GC, slot in
 +                // range: store in place. Otherwise the helper (barrier, errors).
++                // `SetSlotCoerceI` of an int is `SetSlotNoCoerce` (CrossBridge's
++                // `ESP = ...`); it is no stack-cache consumer, so its value is
++                // in the frame here.
 +                let (obj, val) = (slot(d - 2), slot(d - 1));
 +                let mut to_slow = Vec::new();
++                if matches!(op, Op::SetSlotCoerceI { .. }) {
++                    a.ldrb(9, X19, val);
++                    a.cmp_w(9, lay.int_tag as u32);
++                    to_slow.push(a.fwd(Fix::BCond(NE)));
++                }
 +                a.ldrb(9, X19, obj);
 +                if lay.obj_tags.len() == 1 {
 +                    a.cmp_w(9, lay.obj_tags[0] as u32);
@@ -3092,6 +3437,183 @@ index 000000000..5686a1983
 +                let done = a.here();
 +                a.set(to_done, done);
 +                tos = Tos::Mem;
++            }
++            Op::Li8 | Op::Li16 | Op::Li32 | Op::Lf32 | Op::Lf64 | Op::Si8 | Op::Si16 | Op::Si32
++            | Op::Sf32 | Op::Sf64
++                if cb && lay.words_ok && slot(d - 1) + 16 < 4096 =>
++            {
++                // Domain memory, in place: an int address in range of the view
++                // `h_dm` took (`Ctx::dm_*`), while no ByteArray changed since.
++                // Anything else is the helper, which raises the errors.
++                let load = matches!(op, Op::Li8 | Op::Li16 | Op::Li32 | Op::Lf32 | Op::Lf64);
++                let addr = slot(d - 1);
++                let width = match op {
++                    Op::Li8 | Op::Si8 => 1,
++                    Op::Li16 | Op::Si16 => 2,
++                    Op::Lf64 | Op::Sf64 => 8,
++                    _ => 4,
++                };
++                let mut to_slow = Vec::new();
++                a.ldr_x(9, X21, CTX_GEN);
++                a.ldr_x(9, 9, 0);
++                a.ldr_x(10, X21, CTX_DM_GEN);
++                a.cmp_xx(9, 10);
++                let to_refresh = a.fwd(Fix::BCond(NE));
++                let go = a.here();
++                a.ldrb(11, X19, addr);
++                a.cmp_w(11, lay.int_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                // ldr w zero-extends: a load takes the address as a u32, as
++                // `coerce_to_u32` does; a store refuses a negative one.
++                a.ldr_w(12, X19, addr + lay.int_off);
++                if !load {
++                    a.cmp_w(12, 0);
++                    to_slow.push(a.fwd(Fix::BCond(LT)));
++                }
++                a.ldr_x(13, X21, CTX_DM_LEN);
++                a.add_xi(16, 12, width);
++                a.cmp_xx(16, 13);
++                to_slow.push(a.fwd(Fix::BCond(HI)));
++                if !load {
++                    let val = slot(d - 2);
++                    a.ldrb(11, X19, val);
++                    if matches!(op, Op::Sf32 | Op::Sf64) {
++                        // A Number, or an int as `coerce_to_number` makes it.
++                        a.cmp_w(11, lay.num_tag as u32);
++                        let is_num = a.fwd(Fix::BCond(EQ));
++                        a.cmp_w(11, lay.int_tag as u32);
++                        to_slow.push(a.fwd(Fix::BCond(NE)));
++                        a.ldr_w(16, X19, val + lay.int_off);
++                        a.e(0x1E62_0200); // scvtf d0, w16
++                        let to_have = a.fwd(Fix::B);
++                        let num = a.here();
++                        a.set(is_num, num);
++                        a.ldr_d(0, X19, val + lay.num_off);
++                        let have = a.here();
++                        a.set(to_have, have);
++                    } else {
++                        a.cmp_w(11, lay.int_tag as u32);
++                        to_slow.push(a.fwd(Fix::BCond(NE)));
++                        a.ldr_w(16, X19, val + lay.int_off);
++                    }
++                }
++                a.ldr_x(17, X21, CTX_DM_PTR);
++                match op {
++                    Op::Li8 => a.mem_reg(MEM_LDRB, 16, 17, 12),
++                    Op::Li16 => a.mem_reg(MEM_LDRH, 16, 17, 12),
++                    Op::Li32 => a.mem_reg(MEM_LDR_W, 16, 17, 12),
++                    Op::Lf32 => {
++                        a.mem_reg(MEM_LDR_S, 0, 17, 12);
++                        a.e(0x1E22_C000); // fcvt d0, s0
++                    }
++                    Op::Lf64 => a.mem_reg(MEM_LDR_D, 0, 17, 12),
++                    Op::Si8 => a.mem_reg(MEM_STRB, 16, 17, 12),
++                    Op::Si16 => a.mem_reg(MEM_STRH, 16, 17, 12),
++                    Op::Si32 => a.mem_reg(MEM_STR_W, 16, 17, 12),
++                    Op::Sf32 => {
++                        a.e(0x1E62_4000); // fcvt s0, d0
++                        a.mem_reg(MEM_STR_S, 0, 17, 12);
++                    }
++                    _ => a.mem_reg(MEM_STR_D, 0, 17, 12),
++                }
++                // The result replaces the address: an int over an int keeps
++                // its tag word, a Number writes its own.
++                match op {
++                    Op::Li8 | Op::Li16 | Op::Li32 => a.str_w(16, X19, addr + lay.int_off),
++                    Op::Lf32 | Op::Lf64 => {
++                        let r = a.mov_x(9, lay.num_word);
++                        a.str_x(r, X19, addr);
++                        a.str_d(0, X19, addr + lay.num_off);
++                    }
++                    _ => {}
++                }
++                let to_done = a.fwd(Fix::B);
++                let refresh = a.here();
++                a.set(to_refresh, refresh);
++                a.call(H_DM, 0, 0, 0, false);
++                a.ldr_x(9, X21, CTX_GEN);
++                a.ldr_x(9, 9, 0);
++                a.ldr_x(10, X21, CTX_DM_GEN);
++                a.cmp_xx(9, 10);
++                a.branch(Fix::BCond(EQ), Target::Code(go));
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                let post = if load { d } else { d - 2 };
++                a.call(kind(op), d, i, post, true);
++                let done = a.here();
++                a.set(to_done, done);
++            }
++            Op::Sxi1 | Op::Sxi8 | Op::Sxi16 | Op::BitNot | Op::CoerceU
++                if cb && lay.words_ok && slot(d - 1) + 16 < 4096 =>
++            {
++                // On an int: the interpreter's int result, in place.
++                let v = slot(d - 1);
++                a.ldrb(9, X19, v);
++                a.cmp_w(9, lay.int_tag as u32);
++                let mut to_slow = std::vec![a.fwd(Fix::BCond(NE))];
++                a.ldr_w(10, X19, v + lay.int_off);
++                match op {
++                    Op::Sxi1 => a.e(0x1300_014A),  // sbfx w10, w10, #0, #1
++                    Op::Sxi8 => a.e(0x1300_1D4A),  // sxtb w10, w10
++                    Op::Sxi16 => a.e(0x1300_3D4A), // sxth w10, w10
++                    Op::BitNot => a.e(0x2A2A_03EA), // mvn w10, w10
++                    _ => {
++                        // A negative int is a uint above int range: a Number.
++                        a.cmp_w(10, 0);
++                        to_slow.push(a.fwd(Fix::BCond(LT)));
++                    }
++                }
++                if !matches!(op, Op::CoerceU) {
++                    a.str_w(10, X19, v + lay.int_off);
++                }
++                let to_done = a.fwd(Fix::B);
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                a.call(kind(op), d, i, d, true);
++                let done = a.here();
++                a.set(to_done, done);
++            }
++            Op::BitAnd | Op::BitOr | Op::BitXor | Op::LShift | Op::RShift | Op::URShift
++                if cb && lay.words_ok && d >= 2 && slot(d - 1) + 16 < 4096 =>
++            {
++                // Two ints: the int result in the first operand's slot.
++                let (v1, v2) = (slot(d - 2), slot(d - 1));
++                let mut to_slow = Vec::new();
++                a.ldrb(9, X19, v1);
++                a.ldrb(10, X19, v2);
++                a.cmp_w(9, lay.int_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                a.cmp_w(10, lay.int_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                a.ldr_w(10, X19, v1 + lay.int_off);
++                a.ldr_w(11, X19, v2 + lay.int_off);
++                // The shifts take the count mod 32, as `& 0x1F` does.
++                a.e(match op {
++                    Op::BitAnd => 0x0A0B_014A, // and w10, w10, w11
++                    Op::BitOr => 0x2A0B_014A,  // orr
++                    Op::BitXor => 0x4A0B_014A, // eor
++                    Op::LShift => 0x1ACB_214A, // lsl
++                    Op::RShift => 0x1ACB_294A, // asr
++                    _ => 0x1ACB_254A,          // lsr
++                });
++                if matches!(op, Op::URShift) {
++                    // Above int range: the interpreter's answer is a Number.
++                    a.cmp_w(10, 0);
++                    to_slow.push(a.fwd(Fix::BCond(LT)));
++                }
++                a.str_w(10, X19, v1 + lay.int_off);
++                let to_done = a.fwd(Fix::B);
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                a.call(kind(op), d, i, d - 1, true);
++                let done = a.here();
++                a.set(to_done, done);
 +            }
 +            Op::CallMethod { num_args, push_return_value, .. } => {
 +                let post = d - 1 - *num_args as usize + *push_return_value as usize;
@@ -3185,6 +3707,10 @@ index 000000000..5686a1983
 +    unsafe {
 +        let c = &mut *ctx;
 +        let act = &mut *c.act;
++        // The backward branches the compiled code counted down count too:
++        // the clock and the pause are looked at every 10 000, as before.
++        c.poll = POLL_EVERY - 1;
++        *act.context.actions_since_timeout_check += POLL_EVERY - 1;
 +        match act.timeout_check() {
 +            Ok(()) => 0,
 +            Err(e) => {
@@ -3192,6 +3718,30 @@ index 000000000..5686a1983
 +                1
 +            }
 +        }
++    }
++}
++
++/// The inline domain memory ops' view (`Ctx::dm_*`): this activation's domain
++/// memory, as a writable pointer and a length, with the counter it is valid
++/// under. Left invalid while those bytes are borrowed: the op then takes its
++/// own helper, like the interpreter.
++unsafe extern "C" fn h_dm(ctx: *mut Ctx, _: u32, _: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        match act.domain_memory().flashnx_dm_view() {
++            Some((ptr, len)) => {
++                c.dm_ptr = ptr;
++                c.dm_len = len;
++                c.dm_gen = crate::avm2::bytearray::FLASHNX_BYTES_GEN.load(AtomicOrdering::Relaxed);
++                state().dm_views += 1;
++            }
++            None => {
++                c.dm_gen = u64::MAX;
++                state().dm_refused += 1;
++            }
++        }
++        0
 +    }
 +}
 +
@@ -3285,27 +3835,54 @@ index 000000000..5686a1983
 +    index: usize,
 +    n: usize,
 +) -> Option<Result<Value<'static>, Error<'static>>> {
++    // Count why the call goes the slow way, naming one callee in 1024.
++    let why = |k: usize, method: Option<Method<'_>>| {
++        let s = state();
++        s.slow_why[k] += 1;
++        if let Some(method) = method
++            && s.slow_why[k] % 1024 == 1
++        {
++            let mut name = crate::string::WString::new();
++            crate::avm2::function::display_function(&mut name, method);
++            *s.slow_names.entry(format!("{} {}", SLOW_WHY[k], name.to_utf8_lossy())).or_insert(0) += 1;
++        }
++        None
++    };
 +    if n > 16 || !DIRECT_CALLS.load(AtomicOrdering::Relaxed) || !fast_calls() || crate::flashnx_as3prof::enabled() {
-+        return None;
++        return why(0, None);
 +    }
 +    let receiver = unsafe { *frame.add(recv) };
-+    let Value::Object(obj) = receiver else { return None };
-+    if obj.get_bound_method(index).is_some() {
-+        return None;
++    let Value::Object(obj) = receiver else { return why(1, None) };
++    // A bound method of this object (`get_bound_method`) is what
++    // `call_method_with_args` calls when there is one. It was bound from the
++    // same vtable entry, to this very receiver, with the same scope and
++    // superclass (`VTable::bind_method`), and only differs as the `callee` of
++    // an `arguments` object, which is refused below: the call is the same.
++    // CrossBridge code takes the address of many of its functions (function
++    // pointers, C++ vtables), which binds them.
++    if !CROSSBRIDGE.load(AtomicOrdering::Relaxed) && obj.get_bound_method(index).is_some() {
++        return why(2, None);
 +    }
-+    let full = obj.vtable().get_full_method(index)?;
++    let Some(full) = obj.vtable().get_full_method(index) else { return why(3, None) };
 +    let method = full.method;
++    if matches!(method.method_kind(), crate::avm2::method::MethodKind::Native { .. }) {
++        return why(4, Some(method));
++    }
 +    let code = method.flashnx_jit().get();
-+    if code == REJECTED || code <= 0xFFFF {
-+        return None;
++    if code == REJECTED {
++        return why(5, Some(method));
++    }
++    if code <= 0xFFFF {
++        return why(6, Some(method));
 +    }
 +    if method.needs_arguments_object() || method.is_variadic() {
-+        return None;
++        return why(7, Some(method));
 +    }
-+    let num_locals = method.body()?.num_locals as usize;
++    let Some(body) = method.body() else { return why(8, Some(method)) };
++    let num_locals = body.num_locals as usize;
 +    let signature = method.resolved_param_config();
 +    if signature.len() != n || num_locals < n + 1 {
-+        return None;
++        return why(9, Some(method));
 +    }
 +    // 0: as is, 1: int -> Number, 2: undefined -> null (what coerce_to_type does).
 +    let mut conv = [0u8; 16];
@@ -3314,27 +3891,27 @@ index 000000000..5686a1983
 +        let Some(class) = param.param_type else { continue };
 +        conv[i] = if class.is_builtin_int() {
 +            if !matches!(v, Value::Integer(_)) {
-+                return None;
++                return why(10, Some(method));
 +            }
 +            0
 +        } else if class.is_builtin_uint() {
 +            if !matches!(v, Value::Integer(x) if x >= 0) {
-+                return None;
++                return why(10, Some(method));
 +            }
 +            0
 +        } else if class.is_builtin_number() {
 +            match v {
 +                Value::Number(_) => 0,
 +                Value::Integer(_) => 1,
-+                _ => return None,
++                _ => return why(10, Some(method)),
 +            }
 +        } else if class.is_builtin_boolean() {
 +            if !matches!(v, Value::Bool(_)) {
-+                return None;
++                return why(10, Some(method));
 +            }
 +            0
 +        } else if class.is_builtin_void() {
-+            return None;
++            return why(10, Some(method));
 +        } else {
 +            match v {
 +                Value::Null => 0,
@@ -3342,7 +3919,7 @@ index 000000000..5686a1983
 +                Value::String(_) if class.is_builtin_string() => 0,
 +                _ if class.is_builtin_object() => 0,
 +                Value::Object(o) if o.is_of_type(class) => 0,
-+                _ => return None,
++                _ => return why(10, Some(method)),
 +            }
 +        };
 +    }
@@ -3405,6 +3982,7 @@ index 000000000..5686a1983
 +    t[H_ARRAY_GET] = h_array_get as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TRUTHY] = h_truthy as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_SWITCH] = h_switch as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_DM] = h_dm as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +}
@@ -3464,6 +4042,11 @@ index 000000000..5686a1983
 +    let mut ctx = Ctx {
 +        frame: act.stack.base_ptr() as *mut Value<'static>,
 +        helpers: state().helpers.as_ptr(),
++        dm_ptr: std::ptr::null_mut(),
++        dm_len: 0,
++        dm_gen: u64::MAX,
++        gen_ptr: crate::avm2::bytearray::FLASHNX_BYTES_GEN.as_ptr(),
++        poll: POLL_EVERY - 1,
 +        act: act as *mut Activation<'a, 'gc> as *mut Act,
 +        ops: ops as *const Op<'static>,
 +        num_locals: act.num_locals,
@@ -3520,7 +4103,7 @@ index 000000000..5686a1983
 +    };
 +    let l = &s.layout;
 +    let out = format!(
-+        "{} (rc=0x{:x}, bool {}, numbers {}, setslot {}, getslot {:?} slots@{}/{} {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs, calls {} direct / {} slow",
++"{} (rc=0x{:x}, bool {}, numbers {}, setslot {}, getslot {:?} slots@{}/{} {}, crossbridge {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs, calls {} direct / {} slow [{}] [{}], domain memory views {} ({} refused)",
 +        if s.init == 1 { "on" } else { "UNAVAILABLE" },
 +        s.init_rc,
 +        if l.bool_ok { "inline" } else { "helper" },
@@ -3530,6 +4113,7 @@ index 000000000..5686a1983
 +        l.slots_ptr_off,
 +        l.slots_len_off,
 +        l.obj_fail,
++        if CROSSBRIDGE.load(AtomicOrdering::Relaxed) { "on" } else { "off" },
 +        s.compiled,
 +        s.used / 1024,
 +        s.rejected,
@@ -3538,11 +4122,25 @@ index 000000000..5686a1983
 +        top(&s.deopt_ops),
 +        s.runs,
 +        s.calls_direct,
-+        s.calls_slow
++        s.calls_slow,
++        SLOW_WHY
++            .iter()
++            .zip(s.slow_why.iter())
++            .filter(|(_, n)| **n > 0)
++            .map(|(k, n)| format!("{k} x{n}"))
++            .collect::<Vec<_>>()
++            .join(", "),
++        top(&s.slow_names),
++        s.dm_views,
++        s.dm_refused
 +    );
++    s.slow_why = [0; SLOW_WHY.len()];
++    s.slow_names.clear();
 +    s.runs = 0;
 +    s.calls_direct = 0;
 +    s.calls_slow = 0;
++    s.dm_views = 0;
++    s.dm_refused = 0;
 +    // Measuring builds: the op kinds compiled code ran through their helper
 +    // most often since the last report (`HELPER_N`).
 +    #[cfg(feature = "flashnx_instr")]
@@ -3846,7 +4444,7 @@ index 0f9e82491..fb42c1c94 100644
                      if let ArrayStorage::Sparse { .. } = self {
                          self.set_length(size);
 diff --git a/core/src/avm2/bytearray.rs b/core/src/avm2/bytearray.rs
-index 7fc6b14d6..258df12af 100644
+index 7fc6b14d6..ba04c9087 100644
 --- a/core/src/avm2/bytearray.rs
 +++ b/core/src/avm2/bytearray.rs
 @@ -3,6 +3,7 @@ use crate::avm2::Error;
@@ -3857,7 +4455,27 @@ index 7fc6b14d6..258df12af 100644
  use flate2::Compression;
  use flate2::read::*;
  use gc_arena::Collect;
-@@ -78,9 +79,14 @@ pub enum ObjectEncoding {
+@@ -11,6 +12,19 @@ use std::cmp;
+ use std::fmt::{self, Display, Formatter};
+ use std::io::prelude::*;
+ use std::io::{self, SeekFrom};
++use std::sync::atomic::{AtomicU64, Ordering};
++
++/// FlashNX: moves whenever the bytes of any ByteArray may have moved or been
++/// resized (every `ByteArrayObject::storage_mut`, a domain's memory replaced),
++/// so compiled code can keep a pointer to its domain memory between two such
++/// events (`activation_jit`, the inline `li*` / `si*` ops). Single-threaded:
++/// a plain load and store, no read-modify-write.
++pub static FLASHNX_BYTES_GEN: AtomicU64 = AtomicU64::new(1);
++
++#[inline(always)]
++pub fn flashnx_bytes_changed() {
++    FLASHNX_BYTES_GEN.store(FLASHNX_BYTES_GEN.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
++}
+ 
+ #[derive(Clone, Collect, Debug, Copy, PartialEq, Eq)]
+ #[collect(no_drop)]
+@@ -78,9 +92,14 @@ pub enum ObjectEncoding {
  
  #[derive(Clone, Debug)]
  pub struct ByteArrayStorage {
@@ -3873,7 +4491,7 @@ index 7fc6b14d6..258df12af 100644
      /// The current position to read/write from
      position: Cell<usize>,
  
-@@ -96,6 +102,7 @@ impl ByteArrayStorage {
+@@ -96,6 +115,7 @@ impl ByteArrayStorage {
      pub fn new(context: &mut UpdateContext<'_>) -> ByteArrayStorage {
          ByteArrayStorage {
              bytes: Vec::new(),
@@ -3881,7 +4499,7 @@ index 7fc6b14d6..258df12af 100644
              position: Cell::new(0),
              endian: Endian::Big,
              object_encoding: context.avm2.default_bytearray_encoding,
-@@ -106,12 +113,50 @@ impl ByteArrayStorage {
+@@ -106,12 +126,61 @@ impl ByteArrayStorage {
      pub fn from_vec(context: &mut UpdateContext<'_>, bytes: Vec<u8>) -> ByteArrayStorage {
          ByteArrayStorage {
              bytes,
@@ -3910,6 +4528,17 @@ index 7fc6b14d6..258df12af 100644
 +        }
 +    }
 +
++    /// FlashNX: the bytes as a private buffer and their length, for compiled
++    /// code's view of domain memory (`ByteArrayObject::flashnx_dm_view`).
++    /// Shared bytes are copied first, which moves them: then say so.
++    pub fn flashnx_raw_mut(&mut self) -> (*mut u8, usize) {
++        if self.shared.is_some() {
++            self.unshare();
++            flashnx_bytes_changed();
++        }
++        (self.bytes.as_mut_ptr(), self.bytes.len())
++    }
++
 +    /// FlashNX: these bytes as a shared range, without a copy: this ByteArray
 +    /// keeps them too, and copies them before its next write (`SharedBytes`).
 +    pub fn share(&mut self) -> SharedBytes {
@@ -3932,7 +4561,7 @@ index 7fc6b14d6..258df12af 100644
      /// Write bytes at the next position in the ByteArray, growing if needed.
      #[inline]
      pub fn write_bytes(&mut self, buf: &[u8]) -> Result<(), ByteArrayError> {
-@@ -152,7 +197,7 @@ impl ByteArrayStorage {
+@@ -152,7 +221,7 @@ impl ByteArrayStorage {
      /// Reads any amount of bytes at any offset in the ByteArray
      #[inline]
      pub fn read_at(&self, amnt: usize, offset: usize) -> Result<&[u8], ByteArrayError> {
@@ -3941,7 +4570,7 @@ index 7fc6b14d6..258df12af 100644
              .get(offset..)
              .and_then(|bytes| bytes.get(..amnt))
              .ok_or(ByteArrayError::EndOfFile)
-@@ -170,6 +215,7 @@ impl ByteArrayStorage {
+@@ -170,6 +239,7 @@ impl ByteArrayStorage {
          if self.len() < new_len {
              self.set_length(new_len);
          }
@@ -3949,7 +4578,7 @@ index 7fc6b14d6..258df12af 100644
          self.bytes
              .get_mut(offset..new_len)
              .expect("ByteArray write out of bounds")
-@@ -180,6 +226,7 @@ impl ByteArrayStorage {
+@@ -180,6 +250,7 @@ impl ByteArrayStorage {
      /// Write bytes at any offset in the ByteArray
      /// Will return an error if the new buffer does not fit the ByteArray
      pub fn write_at_nongrowing(&mut self, buf: &[u8], offset: usize) -> Result<(), ByteArrayError> {
@@ -3957,7 +4586,7 @@ index 7fc6b14d6..258df12af 100644
          self.bytes
              .get_mut(offset..)
              .and_then(|bytes| bytes.get_mut(..buf.len()))
-@@ -213,6 +260,7 @@ impl ByteArrayStorage {
+@@ -213,6 +284,7 @@ impl ByteArrayStorage {
              self.set_length(new_len);
          }
  
@@ -3965,7 +4594,7 @@ index 7fc6b14d6..258df12af 100644
          self.bytes.copy_within(start..end, offset);
          Ok(())
      }
-@@ -224,15 +272,15 @@ impl ByteArrayStorage {
+@@ -224,15 +296,15 @@ impl ByteArrayStorage {
              CompressionAlgorithm::Zlib => {
                  // Note: some content is sensitive to compression type
                  // (as it's visible in the header)
@@ -3984,7 +4613,7 @@ index 7fc6b14d6..258df12af 100644
                  .err()
                  .map(|e| e.into()),
              #[cfg(not(feature = "lzma"))]
-@@ -251,15 +299,15 @@ impl ByteArrayStorage {
+@@ -251,15 +323,15 @@ impl ByteArrayStorage {
          let mut buffer = Vec::new();
          let error: Option<Box<dyn std::error::Error>> = match algorithm {
              CompressionAlgorithm::Zlib => {
@@ -4003,7 +4632,7 @@ index 7fc6b14d6..258df12af 100644
                  .err()
                  .map(|e| e.into()),
              #[cfg(not(feature = "lzma"))]
-@@ -299,6 +347,7 @@ impl ByteArrayStorage {
+@@ -299,6 +371,7 @@ impl ByteArrayStorage {
  
      #[inline]
      pub fn clear(&mut self) {
@@ -4011,7 +4640,7 @@ index 7fc6b14d6..258df12af 100644
          self.bytes.clear();
          self.position.set(0)
      }
-@@ -310,15 +359,25 @@ impl ByteArrayStorage {
+@@ -310,15 +383,25 @@ impl ByteArrayStorage {
  
      #[inline]
      pub fn set_length(&mut self, new_len: usize) {
@@ -4038,7 +4667,7 @@ index 7fc6b14d6..258df12af 100644
          if self.len() < (item + 1) {
              self.bytes.resize(item + 1, 0)
          }
-@@ -330,15 +389,21 @@ impl ByteArrayStorage {
+@@ -330,15 +413,21 @@ impl ByteArrayStorage {
      /// method sets the bytearray's `position` to 0.
      pub fn swap_storage_with(&mut self, new_data: &mut Vec<u8>) {
          self.position.set(0);
@@ -4060,7 +4689,7 @@ index 7fc6b14d6..258df12af 100644
          if let Some(i) = self.bytes.get_mut(item) {
              *i = 0;
          }
-@@ -346,17 +411,18 @@ impl ByteArrayStorage {
+@@ -346,17 +435,18 @@ impl ByteArrayStorage {
  
      #[inline]
      pub fn bytes(&self) -> &[u8] {
@@ -4111,7 +4740,7 @@ index 27daaf6bc..340265324 100644
          let name = self.name();
  
 diff --git a/core/src/avm2/domain.rs b/core/src/avm2/domain.rs
-index c90ef4e51..a14f61426 100644
+index c90ef4e51..edb0bd06f 100644
 --- a/core/src/avm2/domain.rs
 +++ b/core/src/avm2/domain.rs
 @@ -69,6 +69,11 @@ struct DomainDataMut<'gc> {
@@ -4144,6 +4773,15 @@ index c90ef4e51..a14f61426 100644
      }
  
      pub fn defs(&self) -> Ref<'_, PropertyMap<'gc, Script<'gc>>> {
+@@ -386,6 +391,8 @@ impl<'gc> Domain<'gc> {
+         };
+         let write = Gc::write(activation.gc(), self.0);
+         unlock!(write, DomainData, domain_memory).set(Some(memory));
++        // FlashNX: compiled code's view of the old memory is stale.
++        crate::avm2::bytearray::flashnx_bytes_changed();
+         Ok(())
+     }
+ 
 diff --git a/core/src/avm2/dynamic_map.rs b/core/src/avm2/dynamic_map.rs
 index 6a0c92a11..d0777428a 100644
 --- a/core/src/avm2/dynamic_map.rs
@@ -4739,6 +5377,91 @@ index ce5e8a5d5..f69928e2e 100644
  
      match output {
          PixelBenderOutput::Bitmap(sync_handle) => {
+diff --git a/core/src/avm2/globals/flash/media/sound.rs b/core/src/avm2/globals/flash/media/sound.rs
+index c6b319a3f..e02f58088 100644
+--- a/core/src/avm2/globals/flash/media/sound.rs
++++ b/core/src/avm2/globals/flash/media/sound.rs
+@@ -6,14 +6,17 @@ use crate::avm2::activation::Activation;
+ use crate::avm2::error::{make_error_2037, make_error_2084};
+ use crate::avm2::globals::methods::flash_media_sound as sound_methods;
+ use crate::avm2::globals::slots::flash_net_url_request as url_request_slots;
++use crate::avm2::bytearray::ByteArrayStorage;
+ use crate::avm2::object::{
+-    EventObject, QueuedPlay, SoundChannelObject, SoundLoadingState, TObject as _,
++    ByteArrayObject, EventObject, QueuedPlay, SoundChannelObject, SoundLoadingState, TObject as _,
+ };
+ use crate::avm2::parameters::ParametersExt;
+ use crate::avm2::value::Value;
++use crate::backend::audio::{DYNAMIC_SOUND_MIN_SAMPLES, dynamic_sound_samples_from_bytearray};
+ use crate::backend::navigator::Request;
+ use crate::character::Character;
+ use crate::display_object::SoundTransform;
++use crate::string::AvmString;
+ use crate::{avm2_stub_getter, avm2_stub_method};
+ use swf::{SoundEvent, SoundInfo};
+ 
+@@ -154,6 +157,61 @@ pub fn play<'gc>(
+         let num_loops = args.get_i32(1);
+         let sound_transform = args.try_get_object(2);
+ 
++        // FlashNX: backport of upstream PR ruffle#24762 (SampleDataEvent,
++        // compared against Flash Player, closed unmerged). A new Sound with no
++        // audio loaded plays what its `sampleData` listener writes: a first
++        // event now, the next ones from `AudioManager::update_sounds`. Super
++        // Mario Bros. Crossover makes its music and sound effects this way and
++        // was silent (#136). Such a Sound plays again the same way: SMBC keeps
++        // one per music player, so with `New` alone only the title music
++        // played, and every level stayed silent.
++        if sound_object.sound_handle().is_none()
++            && matches!(sound_object.loading_state(), SoundLoadingState::New | SoundLoadingState::Generated)
++        {
++            let sound_transform = sound_transform.map(SoundTransform::from_avm2_object);
++            let sound_channel = SoundChannelObject::empty(activation);
++            let storage = ByteArrayStorage::new(activation.context);
++            let data = ByteArrayObject::from_storage(activation.context, storage);
++            let event_type = AvmString::new_utf8(activation.gc(), "sampleData");
++            let sample_data_event_class = activation.avm2().classes().sampledataevent;
++            let event = EventObject::from_class_and_args(
++                activation,
++                sample_data_event_class,
++                &[event_type.into(), false.into(), false.into(), 0.0.into(), data.into()],
++            );
++            Avm2::dispatch_event(activation.context, event, this);
++
++            let written = data.storage().position();
++            let samples = dynamic_sound_samples_from_bytearray(data, written);
++            let initial_position = samples.len() as u32;
++            let dynamic_start_offset = if position > 0.0 {
++                (position / 1000.0 * 44100.0) as u32
++            } else {
++                0
++            };
++            if let Some(instance) = activation.context.start_dynamic_sound(
++                sound_channel,
++                sound_object,
++                data,
++                initial_position,
++                dynamic_start_offset,
++            ) {
++                activation.context.append_dynamic_sound(instance, &samples);
++                if initial_position < DYNAMIC_SOUND_MIN_SAMPLES {
++                    activation.context.finish_dynamic_sound(instance);
++                    activation.context.audio_manager.mark_dynamic_sound_finished(instance);
++                }
++                sound_channel.set_sound_instance(activation.context, instance);
++                if let Some(sound_transform) = sound_transform {
++                    activation.context.set_local_sound_transform(instance, sound_transform);
++                }
++                activation.context.audio_manager.mark_dynamic_sound_play_started(instance);
++                sound_object.set_loading_state(SoundLoadingState::Generated);
++                return Ok(sound_channel.into());
++            }
++            return Ok(Value::Null);
++        }
++
+         let in_sample = if position > 0.0 {
+             Some((position / 1000.0 * 44100.0) as u32)
+         } else {
 diff --git a/core/src/avm2/globals/flash/system/System.as b/core/src/avm2/globals/flash/system/System.as
 index a6c0f2139..bc35902c5 100644
 --- a/core/src/avm2/globals/flash/system/System.as
@@ -4974,6 +5697,43 @@ index 852754058..ea218ca7e 100644
      pub fn storage_mut(self, mc: &Mutation<'gc>) -> RefMut<'gc, ArrayStorage<'gc>> {
          unlock!(Gc::write(mc, self.0), ArrayObjectData, array).borrow_mut()
      }
+diff --git a/core/src/avm2/object/bytearray_object.rs b/core/src/avm2/object/bytearray_object.rs
+index df4144828..1ac58971c 100644
+--- a/core/src/avm2/object/bytearray_object.rs
++++ b/core/src/avm2/object/bytearray_object.rs
+@@ -101,9 +101,7 @@ impl<'gc> ByteArrayObject<'gc> {
+         index: usize,
+         value: Value<'gc>,
+     ) -> Result<(), Error<'gc>> {
+-        self.0
+-            .storage
+-            .borrow_mut()
++        self.storage_mut()
+             .set(index, value.coerce_to_u32(activation)? as u8);
+ 
+         Ok(())
+@@ -114,8 +112,21 @@ impl<'gc> ByteArrayObject<'gc> {
+     }
+ 
+     pub fn storage_mut(self) -> RefMut<'gc, ByteArrayStorage> {
++        // FlashNX: whoever writes may move or resize the bytes.
++        crate::avm2::bytearray::flashnx_bytes_changed();
+         Gc::as_ref(self.0).storage.borrow_mut()
+     }
++
++    /// FlashNX: this ByteArray seen as domain memory by compiled code: a
++    /// writable pointer to its bytes and their length, valid until
++    /// `FLASHNX_BYTES_GEN` moves. Taking it does not move the counter (unless
++    /// shared bytes had to be copied), so every compiled method can take its
++    /// own without invalidating its caller's. `None` while the bytes are
++    /// borrowed elsewhere.
++    pub fn flashnx_dm_view(self) -> Option<(*mut u8, usize)> {
++        let mut storage = Gc::as_ref(self.0).storage.try_borrow_mut().ok()?;
++        Some(storage.flashnx_raw_mut())
++    }
+ }
+ 
+ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
 diff --git a/core/src/avm2/object/event_object.rs b/core/src/avm2/object/event_object.rs
 index 0e6f47c5c..88661652d 100644
 --- a/core/src/avm2/object/event_object.rs
@@ -5122,6 +5882,20 @@ index 8e8934e23..e65423cb9 100644
      }
  
      pub fn get_property_local(
+diff --git a/core/src/avm2/object/sound_object.rs b/core/src/avm2/object/sound_object.rs
+index c9f50d311..006e9a26e 100644
+--- a/core/src/avm2/object/sound_object.rs
++++ b/core/src/avm2/object/sound_object.rs
+@@ -120,6 +120,9 @@ pub enum SoundLoadingState {
+     New,
+     Loading,
+     Loaded,
++    /// FlashNX (ruffle#24762): played with no audio loaded, so fed by its
++    /// `sampleData` listener; `load` then throws #2037.
++    Generated,
+ }
+ 
+ impl<'gc> SoundObject<'gc> {
 diff --git a/core/src/avm2/object/stage3d_object.rs b/core/src/avm2/object/stage3d_object.rs
 index a0118157e..77d3a5b1e 100644
 --- a/core/src/avm2/object/stage3d_object.rs
@@ -5878,10 +6652,17 @@ index 8bbda9662..11f66a221 100644
          context: &UpdateContext<'gc>,
      ) {
 diff --git a/core/src/backend/audio.rs b/core/src/backend/audio.rs
-index 6bed987b7..b321b6e76 100644
+index 6bed987b7..935d6522c 100644
 --- a/core/src/backend/audio.rs
 +++ b/core/src/backend/audio.rs
-@@ -80,6 +80,32 @@ impl From<swf::SoundStreamHead> for SoundStreamInfo {
+@@ -1,5 +1,6 @@
+ use std::any::Any;
+ 
++use crate::avm2::object::{ByteArrayObject, SoundObject};
+ use crate::{
+     avm1::{NativeObject, Object as Avm1Object},
+     avm2::{Avm2, EventObject as Avm2EventObject, SoundChannelObject},
+@@ -80,6 +81,32 @@ impl From<swf::SoundStreamHead> for SoundStreamInfo {
      }
  }
  
@@ -5914,7 +6695,7 @@ index 6bed987b7..b321b6e76 100644
  #[derive(Debug, Error)]
  pub enum RegisterError {
      #[error("MP3 sound is too short")]
-@@ -93,6 +119,21 @@ pub trait AudioBackend: Any {
+@@ -93,6 +120,21 @@ pub trait AudioBackend: Any {
      /// Registers an sound embedded in an SWF.
      fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError>;
  
@@ -5936,6 +6717,258 @@ index 6bed987b7..b321b6e76 100644
      /// Registers MP3 audio from an external source.
      fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError>;
  
+@@ -133,6 +175,28 @@ pub trait AudioBackend: Any {
+         stream_info: &SoundStreamInfo,
+     ) -> Result<SoundInstanceHandle, DecodeError>;
+ 
++    /// FlashNX (ruffle#24762): starts a sound whose sample frames come from
++    /// an AVM2 `sampleData` listener (`append_dynamic_sound`). The defaults
++    /// play nothing, for backends without a mixer.
++    fn start_dynamic_sound(&mut self) -> SoundInstanceHandle {
++        SoundInstanceHandle::null()
++    }
++
++    /// FlashNX (ruffle#24762): queues sample frames on a `sampleData` sound.
++    fn append_dynamic_sound(&mut self, _instance: SoundInstanceHandle, _samples: &[[i16; 2]]) -> bool {
++        true
++    }
++
++    /// FlashNX (ruffle#24762): sample frames queued and not played yet.
++    fn dynamic_sound_buffered_samples(&self, _instance: SoundInstanceHandle) -> Option<usize> {
++        None
++    }
++
++    /// FlashNX (ruffle#24762): the sound ends after what is queued.
++    fn finish_dynamic_sound(&mut self, _instance: SoundInstanceHandle) -> bool {
++        true
++    }
++
+     /// Stops a playing sound instance.
+     /// No-op if the sound is not playing.
+     fn stop_sound(&mut self, sound: SoundInstanceHandle);
+@@ -354,10 +418,41 @@ pub struct AudioManager<'gc> {
+     transforms_dirty: bool,
+ }
+ 
++/// FlashNX (ruffle#24762): a `sampleData` listener writing fewer sample frames
++/// than this ends its sound (Flash Player: 2048).
++pub(crate) const DYNAMIC_SOUND_MIN_SAMPLES: u32 = 2048;
++
++/// FlashNX (ruffle#24762): the stereo float frames a `sampleData` listener
++/// wrote in `data` (`written` bytes, its position after the event), in the
++/// ByteArray's own byte order, as 16-bit frames for the mixer.
++pub(crate) fn dynamic_sound_samples_from_bytearray(data: ByteArrayObject<'_>, written: usize) -> Vec<[i16; 2]> {
++    let storage = data.storage();
++    let bytes = storage.bytes();
++    let little = storage.endian() == crate::avm2::bytearray::Endian::Little;
++    let written = written.min(bytes.len());
++    let written = written - (written % 8);
++    let float = |at: usize| {
++        let b: [u8; 4] = bytes[at..at + 4].try_into().unwrap();
++        let f = if little { f32::from_le_bytes(b) } else { f32::from_be_bytes(b) };
++        // NaN clamps to NaN, and `as` turns it into 0.
++        (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
++    };
++    (0..written / 8).map(|i| [float(i * 8), float(i * 8 + 4)]).collect()
++}
++
+ impl<'gc> AudioManager<'gc> {
+     /// The maximum number of sound instances that can play at once.
+     pub const MAX_SOUNDS: usize = 32;
+ 
++    /// FlashNX (ruffle#24762): a `sampleData` sound gets its next event when
++    /// fewer sample frames than this are left to play (~186 ms). A Ruffle
++    /// buffering policy, not Flash Player's. Tried at 16384 (2026-10-22):
++    /// Super Mario Bros. Crossover's SNES music is made no faster than real
++    /// time on the console, so the queue never got above it and every frame
++    /// paid a 200 ms block (5 fps, against ~22 with gaps in the music at
++    /// 8192). A deeper queue only helps a listener faster than real time.
++    const DYNAMIC_SOUND_REFILL_THRESHOLD: usize = 8192;
++
+     /// The default timeline stream buffer time in seconds.
+     pub const DEFAULT_STREAM_BUFFER_TIME: i32 = 5;
+ 
+@@ -387,6 +482,66 @@ impl<'gc> AudioManager<'gc> {
+         // them after running 'retain()'
+         let mut event_targets = Vec::new();
+ 
++        // FlashNX (ruffle#24762): `sampleData` sounds running low get their
++        // next event. Collected first, so that no AVM2 code runs while
++        // `audio_manager.sounds` is borrowed.
++        let mut dynamic_refills = Vec::new();
++        for sound in &context.audio_manager.sounds {
++            if sound.dynamic_finished {
++                continue;
++            }
++            let (Some(dynamic_sound), Some(dynamic_data)) = (sound.dynamic_sound, sound.dynamic_data) else {
++                continue;
++            };
++            let buffered = context.audio.dynamic_sound_buffered_samples(sound.instance).unwrap_or(0);
++            if buffered < Self::DYNAMIC_SOUND_REFILL_THRESHOLD {
++                let position = sound.dynamic_position.saturating_add(if sound.dynamic_play_started {
++                    sound.dynamic_start_offset
++                } else {
++                    0
++                });
++                dynamic_refills.push((sound.instance, dynamic_sound, dynamic_data, position));
++            }
++        }
++        for (instance, dynamic_sound, dynamic_data, position) in dynamic_refills {
++            // Flash reuses the ByteArray and resets its write position.
++            dynamic_data.storage().set_position(0);
++            let mut activation = crate::avm2::activation::Activation::from_nothing(context);
++            let event_type = AvmString::new_utf8(activation.gc(), "sampleData");
++            let sample_data_event_class = activation.avm2().classes().sampledataevent;
++            let event = Avm2EventObject::from_class_and_args(
++                &mut activation,
++                sample_data_event_class,
++                &[
++                    event_type.into(),
++                    false.into(),
++                    false.into(),
++                    f64::from(position).into(),
++                    dynamic_data.into(),
++                ],
++            );
++            Avm2::dispatch_event(activation.context, event, dynamic_sound.into());
++            // The write position says how much the listener wrote; the length
++            // may still hold bytes of the previous event.
++            let written = dynamic_data.storage().position();
++            let samples = dynamic_sound_samples_from_bytearray(dynamic_data, written);
++            let sample_count = samples.len() as u32;
++            activation.context.append_dynamic_sound(instance, &samples);
++            if sample_count < DYNAMIC_SOUND_MIN_SAMPLES {
++                activation.context.finish_dynamic_sound(instance);
++                activation.context.audio_manager.mark_dynamic_sound_finished(instance);
++            }
++            if let Some(sound) = activation
++                .context
++                .audio_manager
++                .sounds
++                .iter_mut()
++                .find(|sound| sound.instance == instance)
++            {
++                sound.dynamic_position = sound.dynamic_position.saturating_add(sample_count);
++            }
++        }
++
+         // Update the position of sounds, and remove any completed sounds.
+         context.audio_manager.sounds.retain(|sound| {
+             if let Some(pos) = context.audio.get_sound_position(sound.instance) {
+@@ -466,6 +621,12 @@ impl<'gc> AudioManager<'gc> {
+                 transform: display_object::SoundTransform::default(),
+                 avm1_object,
+                 avm2_object: None,
++                dynamic_sound: None,
++                dynamic_data: None,
++                dynamic_position: 0,
++                dynamic_start_offset: 0,
++                dynamic_play_started: false,
++                dynamic_finished: false,
+                 stream_start_frame: None,
+             };
+ 
+@@ -596,6 +757,12 @@ impl<'gc> AudioManager<'gc> {
+                 transform: display_object::SoundTransform::default(),
+                 avm1_object: None,
+                 avm2_object: None,
++                dynamic_sound: None,
++                dynamic_data: None,
++                dynamic_position: 0,
++                dynamic_start_offset: 0,
++                dynamic_play_started: false,
++                dynamic_finished: false,
+                 stream_start_frame: Some(clip_frame),
+             };
+             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
+@@ -622,6 +789,12 @@ impl<'gc> AudioManager<'gc> {
+                 transform: display_object::SoundTransform::default(),
+                 avm1_object: None,
+                 avm2_object: None,
++                dynamic_sound: None,
++                dynamic_data: None,
++                dynamic_position: 0,
++                dynamic_start_offset: 0,
++                dynamic_play_started: false,
++                dynamic_finished: false,
+                 stream_start_frame: None,
+             };
+             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
+@@ -632,6 +805,56 @@ impl<'gc> AudioManager<'gc> {
+         }
+     }
+ 
++    /// FlashNX (ruffle#24762): the `sampleData` sound's channel was handed to
++    /// the game: from now on its event positions count its start offset.
++    pub fn mark_dynamic_sound_play_started(&mut self, instance: SoundInstanceHandle) {
++        if let Some(sound) = self.sounds.iter_mut().find(|sound| sound.instance == instance) {
++            sound.dynamic_play_started = true;
++        }
++    }
++
++    /// FlashNX (ruffle#24762): its listener ended it: no more events.
++    pub fn mark_dynamic_sound_finished(&mut self, instance: SoundInstanceHandle) {
++        if let Some(sound) = self.sounds.iter_mut().find(|sound| sound.instance == instance) {
++            sound.dynamic_finished = true;
++        }
++    }
++
++    /// FlashNX (ruffle#24762): starts a `sampleData` sound for `dynamic_sound`,
++    /// fed from `dynamic_data`; `None` past `MAX_SOUNDS`.
++    pub fn start_dynamic_sound(
++        &mut self,
++        audio: &mut dyn AudioBackend,
++        avm2_object: SoundChannelObject<'gc>,
++        dynamic_sound: SoundObject<'gc>,
++        dynamic_data: ByteArrayObject<'gc>,
++        dynamic_position: u32,
++        dynamic_start_offset: u32,
++    ) -> Option<SoundInstanceHandle> {
++        if self.sounds.len() >= Self::MAX_SOUNDS {
++            return None;
++        }
++        let handle = audio.start_dynamic_sound();
++        let instance = SoundInstance {
++            sound: None,
++            instance: handle,
++            display_object: None,
++            transform: display_object::SoundTransform::default(),
++            avm1_object: None,
++            avm2_object: Some(avm2_object),
++            dynamic_sound: Some(dynamic_sound),
++            dynamic_data: Some(dynamic_data),
++            dynamic_position,
++            dynamic_start_offset,
++            dynamic_play_started: false,
++            dynamic_finished: false,
++            stream_start_frame: None,
++        };
++        audio.set_sound_transform(handle, self.transform_for_sound(&instance));
++        self.sounds.push(instance);
++        Some(handle)
++    }
++
+     /// Returns the difference in seconds between the primary audio stream's time and the player's time.
+     pub fn audio_skew_time(&mut self, audio: &mut dyn AudioBackend, offset_ms: f64) -> f64 {
+         // Consider the first playing "stream" sound to be the primary audio track.
+@@ -843,6 +1066,17 @@ pub struct SoundInstance<'gc> {
+     /// The AVM2 `SoundChannel` object associated with this sound, if any.
+     avm2_object: Option<SoundChannelObject<'gc>>,
+ 
++    /// FlashNX (ruffle#24762): for a `sampleData` sound, its `Sound`, the
++    /// ByteArray its events carry, the sample frames given so far, the start
++    /// offset `play` was asked for, whether `play` returned, and whether its
++    /// listener ended it.
++    dynamic_sound: Option<SoundObject<'gc>>,
++    dynamic_data: Option<ByteArrayObject<'gc>>,
++    dynamic_position: u32,
++    dynamic_start_offset: u32,
++    dynamic_play_started: bool,
++    dynamic_finished: bool,
++
+     stream_start_frame: Option<u16>,
+ }
+ 
 diff --git a/core/src/backend/audio/decoders.rs b/core/src/backend/audio/decoders.rs
 index 20950aefc..09870c8ba 100644
 --- a/core/src/backend/audio/decoders.rs
@@ -5952,11 +6985,14 @@ index 20950aefc..09870c8ba 100644
  
  /// An audio decoder. Can be used as an `Iterator` to return stereo sample frames.
 diff --git a/core/src/backend/audio/mixer.rs b/core/src/backend/audio/mixer.rs
-index b98eb3f76..345782817 100644
+index b98eb3f76..8991f2694 100644
 --- a/core/src/backend/audio/mixer.rs
 +++ b/core/src/backend/audio/mixer.rs
-@@ -9,6 +9,35 @@ use ruffle_common::duration::FloatDuration;
+@@ -7,8 +7,38 @@ use crate::tag_utils::SwfSlice;
+ use ruffle_common::buffer::Substream;
+ use ruffle_common::duration::FloatDuration;
  use slotmap::SlotMap;
++use std::collections::VecDeque;
  use std::io::Cursor;
  use std::sync::{Arc, Mutex, RwLock};
 +
@@ -5991,7 +7027,69 @@ index b98eb3f76..345782817 100644
  use swf::AudioCompression;
  
  /// Holds the last 2048 output audio frames. Frames can be written to it one by
-@@ -150,7 +179,7 @@ struct Sound {
+@@ -90,6 +120,61 @@ trait Stream: dasp::signal::Signal<Frame = [i16; 2]> + Send + Sync {
+     fn source_sample_rate(&self) -> u16;
+ }
+ 
++/// FlashNX: backport of upstream PR ruffle#24762 (closed unmerged, the
++/// SampleDataEvent implementation compared against Flash Player): the sample
++/// frames an AVM2 `sampleData` listener wrote, played as they come, at
++/// 44.1 kHz, until the listener writes too few (`finished`).
++struct DynamicSoundStream {
++    samples: Arc<Mutex<VecDeque<[i16; 2]>>>,
++    position: u32,
++    finished: Arc<Mutex<bool>>,
++}
++
++impl DynamicSoundStream {
++    fn new(samples: Arc<Mutex<VecDeque<[i16; 2]>>>, finished: Arc<Mutex<bool>>) -> Self {
++        Self {
++            samples,
++            finished,
++            position: 0,
++        }
++    }
++}
++
++impl Stream for DynamicSoundStream {
++    fn source_position(&self) -> u32 {
++        self.position
++    }
++
++    fn source_sample_rate(&self) -> u16 {
++        44100
++    }
++}
++
++impl dasp::signal::Signal for DynamicSoundStream {
++    type Frame = [i16; 2];
++
++    fn next(&mut self) -> Self::Frame {
++        self.position = self.position.wrapping_add(1);
++        self.samples
++            .lock()
++            .expect("Cannot be called reentrant")
++            .pop_front()
++            .unwrap_or_default()
++    }
++
++    fn is_exhausted(&self) -> bool {
++        *self
++            .finished
++            .lock()
++            .expect("Dynamic sound finished mutex poisoned")
++            && self
++                .samples
++                .lock()
++                .expect("Dynamic sound samples mutex poisoned")
++                .is_empty()
++    }
++}
++
+ /// A stream that wraps a `Decoder`.
+ struct DecoderStream<D> {
+     decoder: D,
+@@ -150,7 +235,7 @@ struct Sound {
      /// The audio data of this sound.
      ///
      /// This will be compressed in the format indicated by `format.compression`.
@@ -6000,7 +7098,56 @@ index b98eb3f76..345782817 100644
  
      /// Number of samples in this audio.
      /// This does not include `skip_sample_frames`.
-@@ -298,7 +327,7 @@ impl AudioMixer {
+@@ -178,6 +263,11 @@ struct SoundInstance {
+     /// The audio stream. Call `next()` to yield sample frames.
+     stream: Box<dyn Stream>,
+ 
++    /// FlashNX (ruffle#24762): what a `sampleData` sound's stream plays, and
++    /// whether its listener has ended it. `None` for every other sound.
++    dynamic_samples: Option<Arc<Mutex<VecDeque<[i16; 2]>>>>,
++    dynamic_finished: Option<Arc<Mutex<bool>>>,
++
+     /// Flag indicating whether this sound is still playing.
+     /// If this flag is false, the sound will be cleaned up during the
+     /// next loop of the sound thread.
+@@ -206,6 +296,8 @@ impl SoundInstance {
+         SoundInstance {
+             handle: Some(handle),
+             stream,
++            dynamic_samples: None,
++            dynamic_finished: None,
+             active: true,
+             left_transform: [1.0, 0.0],
+             right_transform: [0.0, 1.0],
+@@ -221,6 +313,27 @@ impl SoundInstance {
+         SoundInstance {
+             handle: None,
+             stream,
++            dynamic_samples: None,
++            dynamic_finished: None,
++            active: true,
++            left_transform: [1.0, 0.0],
++            right_transform: [0.0, 1.0],
++            peak: [0.0, 0.0],
++            range: ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]),
++        }
++    }
++
++    /// FlashNX (ruffle#24762): a `sampleData` sound.
++    fn new_dynamic(
++        stream: Box<dyn Stream>,
++        samples: Arc<Mutex<VecDeque<[i16; 2]>>>,
++        finished: Arc<Mutex<bool>>,
++    ) -> Self {
++        SoundInstance {
++            handle: None,
++            stream,
++            dynamic_samples: Some(samples),
++            dynamic_finished: Some(finished),
+             active: true,
+             left_transform: [1.0, 0.0],
+             right_transform: [0.0, 1.0],
+@@ -298,7 +411,7 @@ impl AudioMixer {
      ///  * ActionScript sounds that may have a custom start and loop setting
      fn make_seekable_decoder(
          format: &swf::SoundFormat,
@@ -6009,7 +7156,7 @@ index b98eb3f76..345782817 100644
      ) -> Result<Box<dyn SeekableDecoder>, decoders::Error> {
          let decoder: Box<dyn SeekableDecoder> = match format.compression {
              AudioCompression::UncompressedUnknownEndian => {
-@@ -359,7 +388,7 @@ impl AudioMixer {
+@@ -359,7 +472,7 @@ impl AudioMixer {
          &self,
          sound: &Sound,
          settings: &swf::SoundInfo,
@@ -6018,7 +7165,7 @@ index b98eb3f76..345782817 100644
      ) -> Result<Box<dyn Stream>, DecodeError> {
          // Instantiate a decoder for the compression that the sound data uses.
          let decoder = Self::make_seekable_decoder(&sound.format, data)?;
-@@ -511,6 +540,24 @@ impl AudioMixer {
+@@ -511,6 +624,24 @@ impl AudioMixer {
  
      /// Registers an embedded SWF sound with the audio mixer.
      pub fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
@@ -6043,7 +7190,7 @@ index b98eb3f76..345782817 100644
          // Slice off latency seek for MP3 data.
          let (skip_sample_frames, data) = if swf_sound.format.compression == AudioCompression::Mp3 {
              if swf_sound.data.len() < 2 {
-@@ -524,13 +571,19 @@ impl AudioMixer {
+@@ -524,13 +655,19 @@ impl AudioMixer {
  
          let sound = Sound {
              format: swf_sound.format.clone(),
@@ -6064,7 +7211,7 @@ index b98eb3f76..345782817 100644
      /// Registers an external MP3 with the audio mixer.
      #[cfg(feature = "mp3")]
      pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
-@@ -544,7 +597,7 @@ impl AudioMixer {
+@@ -544,7 +681,7 @@ impl AudioMixer {
                  is_stereo: true,
                  is_16_bit: true,
              },
@@ -6073,7 +7220,67 @@ index b98eb3f76..345782817 100644
              num_sample_frames: metadata.num_sample_frames,
              skip_sample_frames: 0,
          };
-@@ -583,8 +636,11 @@ impl AudioMixer {
+@@ -556,6 +693,59 @@ impl AudioMixer {
+         Err(decoders::Error::UnhandledCompression(AudioCompression::Mp3))
+     }
+ 
++    /// FlashNX (ruffle#24762): starts a sound fed by `append_dynamic_sound`.
++    pub fn start_dynamic_sound(&mut self) -> SoundInstanceHandle {
++        let samples = Arc::new(Mutex::new(VecDeque::new()));
++        let finished = Arc::new(Mutex::new(false));
++        // Resampled to the output rate like every other stream: the PR played
++        // the 44.1 kHz frames as they were, 8.8 % too fast on the console's
++        // 48 kHz output (Super Mario Bros. Crossover's music, #136).
++        let stream = Box::new(self.make_resampler(DynamicSoundStream::new(samples.clone(), finished.clone())));
++        self.sound_instances
++            .lock()
++            .expect("Cannot be called reentrant")
++            .insert(SoundInstance::new_dynamic(stream, samples, finished))
++    }
++
++    /// FlashNX (ruffle#24762): queues sample frames on a `sampleData` sound.
++    pub fn append_dynamic_sound(&mut self, instance: SoundInstanceHandle, samples: &[[i16; 2]]) -> bool {
++        let mut sound_instances = self.sound_instances.lock().expect("Cannot be called reentrant");
++        let Some(instance) = sound_instances.get_mut(instance) else {
++            return false;
++        };
++        let Some(dynamic_samples) = &instance.dynamic_samples else {
++            return false;
++        };
++        dynamic_samples
++            .lock()
++            .expect("Cannot be called reentrant")
++            .extend(samples.iter().copied());
++        true
++    }
++
++    /// FlashNX (ruffle#24762): sample frames of a `sampleData` sound not
++    /// played yet.
++    pub fn dynamic_sound_buffered_samples(&self, instance: SoundInstanceHandle) -> Option<usize> {
++        let sound_instances = self.sound_instances.lock().expect("Cannot be called reentrant");
++        let instance = sound_instances.get(instance)?;
++        let samples = instance.dynamic_samples.as_ref()?;
++        Some(samples.lock().expect("Cannot be called reentrant").len())
++    }
++
++    /// FlashNX (ruffle#24762): a `sampleData` sound ends once what it has
++    /// queued is played.
++    pub fn finish_dynamic_sound(&mut self, instance: SoundInstanceHandle) -> bool {
++        let sound_instances = self.sound_instances.lock().expect("Cannot be called reentrant");
++        let Some(instance) = sound_instances.get(instance) else {
++            return false;
++        };
++        let Some(dynamic_finished) = &instance.dynamic_finished else {
++            return false;
++        };
++        *dynamic_finished.lock().expect("Cannot be called reentrant") = true;
++        true
++    }
++
+     /// Starts a timeline audio stream.
+     pub fn start_stream(
+         &mut self,
+@@ -583,8 +773,11 @@ impl AudioMixer {
          sound_handle: SoundHandle,
          settings: &swf::SoundInfo,
      ) -> Result<SoundInstanceHandle, DecodeError> {
@@ -6087,7 +7294,7 @@ index b98eb3f76..345782817 100644
          // Create a stream that decodes and resamples the sound.
          let stream = if sound.skip_sample_frames == 0
              && settings.in_sample.is_none()
-@@ -605,6 +661,7 @@ impl AudioMixer {
+@@ -605,6 +798,7 @@ impl AudioMixer {
              .lock()
              .expect("Cannot be called reentrant");
          let handle = sound_instances.insert(SoundInstance::new_sound(sound_handle, stream));
@@ -6095,7 +7302,7 @@ index b98eb3f76..345782817 100644
          Ok(handle)
      }
  
-@@ -684,7 +741,7 @@ impl AudioMixer {
+@@ -684,7 +878,7 @@ impl AudioMixer {
      }
  
      pub fn get_sound_size(&self, sound: SoundHandle) -> Option<u32> {
@@ -6104,7 +7311,7 @@ index b98eb3f76..345782817 100644
      }
  
      pub fn get_sound_format(&self, sound: SoundHandle) -> Option<&swf::SoundFormat> {
-@@ -765,20 +822,54 @@ impl AudioMixerProxy {
+@@ -765,20 +959,54 @@ impl AudioMixerProxy {
      }
  }
  
@@ -6166,7 +7373,7 @@ index b98eb3f76..345782817 100644
      }
  }
  
-@@ -1078,6 +1169,20 @@ macro_rules! impl_audio_mixer_backend {
+@@ -1078,6 +1306,20 @@ macro_rules! impl_audio_mixer_backend {
              self.$mixer.register_sound(swf_sound)
          }
  
@@ -6187,6 +7394,33 @@ index b98eb3f76..345782817 100644
          #[inline]
          fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
              self.$mixer.register_mp3(data)
+@@ -1110,6 +1352,26 @@ macro_rules! impl_audio_mixer_backend {
+             self.$mixer.start_substream(stream_data, stream_info)
+         }
+ 
++        #[inline]
++        fn start_dynamic_sound(&mut self) -> SoundInstanceHandle {
++            self.$mixer.start_dynamic_sound()
++        }
++
++        #[inline]
++        fn append_dynamic_sound(&mut self, instance: SoundInstanceHandle, samples: &[[i16; 2]]) -> bool {
++            self.$mixer.append_dynamic_sound(instance, samples)
++        }
++
++        #[inline]
++        fn dynamic_sound_buffered_samples(&self, instance: SoundInstanceHandle) -> Option<usize> {
++            self.$mixer.dynamic_sound_buffered_samples(instance)
++        }
++
++        #[inline]
++        fn finish_dynamic_sound(&mut self, instance: SoundInstanceHandle) -> bool {
++            self.$mixer.finish_dynamic_sound(instance)
++        }
++
+         #[inline]
+         fn stop_sound(&mut self, sound: SoundInstanceHandle) {
+             self.$mixer.stop_sound(sound)
 diff --git a/core/src/backend/navigator.rs b/core/src/backend/navigator.rs
 index 9d02cc0ac..8eda73583 100644
 --- a/core/src/backend/navigator.rs
@@ -6211,10 +7445,10 @@ index 9d02cc0ac..8eda73583 100644
  
  impl Default for NullExecutor {
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 29eb34fdc..7e81a7964 100644
+index 29eb34fdc..d8c9a95fd 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
-@@ -15,6 +15,133 @@ use std::ops::Range;
+@@ -15,6 +15,162 @@ use std::ops::Range;
  use swf::{Rectangle, Twips};
  use tracing::instrument;
  
@@ -6280,12 +7514,41 @@ index 29eb34fdc..7e81a7964 100644
 +/// so the refusal guard can never catch them — and it must not, since the screen
 +/// buffer it would also catch is exactly the same size. Forcing a full cycle when
 +/// pressure is high flattens the peaks instead of refusing anything.
++///
++/// Only when the bytes grew by `BITMAPDATA_REGROWTH_BYTES` since the last full
++/// cycle (or since their lowest point): a game whose bitmaps are simply alive
++/// past half the budget had a full cycle forced on every `update`, which frees
++/// nothing. Super Mario Bros. Crossover keeps ~350 MB of them alive (4 400
++/// bitmaps, every character and skin): ~1 s of collection per frame, the whole
++/// frame, so its title screen ran at 1 fps (#136).
 +pub fn bitmapdata_under_pressure() -> bool {
++    use std::sync::atomic::Ordering;
 +    if BITMAPDATA_BUDGET_BYTES == 0 {
 +        return false;
 +    }
-+    BITMAPDATA_LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
-+        > BITMAPDATA_BUDGET_BYTES / 2
++    let live = BITMAPDATA_LIVE_BYTES.load(Ordering::Relaxed);
++    let mut base = BITMAPDATA_AFTER_FULL_GC.load(Ordering::Relaxed);
++    if live < base {
++        base = live;
++        BITMAPDATA_AFTER_FULL_GC.store(live, Ordering::Relaxed);
++    }
++    live > BITMAPDATA_BUDGET_BYTES / 2 && live > base.saturating_add(BITMAPDATA_REGROWTH_BYTES)
++}
++
++/// FlashNX: live BitmapData bytes after the last full collection, lowered
++/// whenever they drop below it (`bitmapdata_under_pressure`).
++static BITMAPDATA_AFTER_FULL_GC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// FlashNX: growth of live BitmapData bytes that makes the pressure rule force
++/// another full collection. New Super Bowser World's strips come by ~1.2 MB
++/// in bursts and its live total climbed 259 -> 329 -> 349 -> 398 MB: steps of
++/// 20-70 MB, each of which still gets its full cycle.
++const BITMAPDATA_REGROWTH_BYTES: u64 = 32 * 1024 * 1024;
++
++/// FlashNX: a full collection just ended: what BitmapData holds now is alive.
++pub fn bitmapdata_note_full_gc() {
++    use std::sync::atomic::Ordering;
++    BITMAPDATA_AFTER_FULL_GC.store(BITMAPDATA_LIVE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
 +}
 +
 +/// Zero-cost lifetime guard for a `BitmapRawData`'s pixel allocation: adds its
@@ -6348,7 +7611,7 @@ index 29eb34fdc..7e81a7964 100644
  /// An implementation of the Lehmer/Park-Miller random number generator
  /// Uses the fixed parameters m = 2,147,483,647 and a = 16,807
  pub struct LehmerRng {
-@@ -251,6 +378,15 @@ impl<'gc> BitmapData<'gc> {
+@@ -251,6 +407,15 @@ impl<'gc> BitmapData<'gc> {
          Self(data)
      }
  
@@ -6364,7 +7627,7 @@ index 29eb34fdc..7e81a7964 100644
      pub fn dummy(mc: &Mutation<'gc>) -> Self {
          Self(BitmapRawDataWrapper::dummy(mc))
      }
-@@ -366,9 +502,19 @@ impl<'gc> BitmapData<'gc> {
+@@ -366,9 +531,19 @@ impl<'gc> BitmapData<'gc> {
  #[collect(no_drop)]
  pub struct BitmapRawData<'gc> {
      /// The pixels in the bitmap, stored as a array of pre-multiplied ARGB colour values
@@ -6384,7 +7647,7 @@ index 29eb34fdc..7e81a7964 100644
      width: u32,
      height: u32,
      transparency: bool,
-@@ -397,6 +543,18 @@ pub struct BitmapRawData<'gc> {
+@@ -397,6 +572,18 @@ pub struct BitmapRawData<'gc> {
      #[collect(require_static)]
      dirty_state: DirtyState,
  
@@ -6403,7 +7666,7 @@ index 29eb34fdc..7e81a7964 100644
      /// Holds an egui texture handle, used for rendering this Bitmap in the debug ui.
      /// This is automatically set to `None` when the texture is updated (either from
      /// marking the CPU side dirty, or from performing a GPU -> CPU sync).
-@@ -404,6 +562,31 @@ pub struct BitmapRawData<'gc> {
+@@ -404,6 +591,31 @@ pub struct BitmapRawData<'gc> {
      pub egui_texture: std::cell::RefCell<Option<egui::TextureHandle>>,
  }
  
@@ -6435,7 +7698,7 @@ index 29eb34fdc..7e81a7964 100644
  #[derive(Clone, Debug)]
  pub enum DirtyState {
      // Both the CPU and GPU pixels are up to date. We do not need to wait for any syncs to complete
-@@ -428,7 +611,7 @@ mod wrapper {
+@@ -428,7 +640,7 @@ mod wrapper {
      use ruffle_render::commands::CommandHandler;
      use std::cell::Ref;
  
@@ -6444,7 +7707,7 @@ index 29eb34fdc..7e81a7964 100644
  
      /// A wrapper type that ensures that we always wait for a pending
      /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
-@@ -476,6 +659,7 @@ mod wrapper {
+@@ -476,6 +688,7 @@ mod wrapper {
                  mc,
                  BitmapRawData {
                      pixels: Vec::new(),
@@ -6452,7 +7715,7 @@ index 29eb34fdc..7e81a7964 100644
                      width: 0,
                      height: 0,
                      transparency: false,
-@@ -484,6 +668,9 @@ mod wrapper {
+@@ -484,6 +697,9 @@ mod wrapper {
                      avm2_object: None,
                      display_objects: vec![],
                      dirty_state: DirtyState::Clean,
@@ -6462,7 +7725,7 @@ index 29eb34fdc..7e81a7964 100644
                      #[cfg(feature = "egui")]
                      egui_texture: Default::default(),
                  }
-@@ -499,6 +686,7 @@ mod wrapper {
+@@ -499,6 +715,7 @@ mod wrapper {
              let data = self.sync(renderer).borrow();
              BitmapRawData {
                  pixels: data.pixels.clone(),
@@ -6470,7 +7733,7 @@ index 29eb34fdc..7e81a7964 100644
                  width: data.width,
                  height: data.height,
                  transparency: data.transparency,
-@@ -508,6 +696,9 @@ mod wrapper {
+@@ -508,6 +725,9 @@ mod wrapper {
                  display_objects: vec![],
                  // We have no GPU texture, so there's no need to mark as dirty
                  dirty_state: DirtyState::Clean,
@@ -6480,7 +7743,7 @@ index 29eb34fdc..7e81a7964 100644
                  #[cfg(feature = "egui")]
                  egui_texture: Default::default(),
              }
-@@ -734,6 +925,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -734,6 +954,7 @@ impl<'gc> BitmapRawData<'gc> {
                  Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
                  width as usize * height as usize
              ],
@@ -6488,7 +7751,7 @@ index 29eb34fdc..7e81a7964 100644
              width,
              height,
              transparency,
-@@ -742,6 +934,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -742,6 +963,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              display_objects: vec![],
              dirty_state: DirtyState::Clean,
@@ -6498,7 +7761,7 @@ index 29eb34fdc..7e81a7964 100644
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
          }
-@@ -754,6 +949,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -754,6 +978,7 @@ impl<'gc> BitmapRawData<'gc> {
          pixels: Vec<Color>,
      ) -> Self {
          Self {
@@ -6506,7 +7769,7 @@ index 29eb34fdc..7e81a7964 100644
              pixels,
              width,
              height,
-@@ -762,6 +958,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -762,6 +987,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              disposed: false,
              dirty_state: DirtyState::Clean,
@@ -6516,7 +7779,7 @@ index 29eb34fdc..7e81a7964 100644
              display_objects: vec![],
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
-@@ -773,9 +972,12 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -773,9 +1001,12 @@ impl<'gc> BitmapRawData<'gc> {
      }
  
      pub fn dispose(&mut self) {
@@ -6529,7 +7792,7 @@ index 29eb34fdc..7e81a7964 100644
          self.bitmap_handle = None;
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
-@@ -823,11 +1025,13 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -823,11 +1054,13 @@ impl<'gc> BitmapRawData<'gc> {
          sync_handle: Box<dyn SyncHandle>,
          region: PixelRegion,
      ) {
@@ -6543,7 +7806,7 @@ index 29eb34fdc..7e81a7964 100644
          debug_assert!(region.x_max <= self.width);
          debug_assert!(region.y_max <= self.height);
  
-@@ -853,11 +1057,30 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -853,11 +1086,30 @@ impl<'gc> BitmapRawData<'gc> {
      }
  
      pub fn pixels(&self) -> &[Color] {
@@ -6576,7 +7839,7 @@ index 29eb34fdc..7e81a7964 100644
      }
  
      pub fn width(&self) -> u32 {
-@@ -873,11 +1096,15 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -873,11 +1125,15 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
@@ -6592,7 +7855,7 @@ index 29eb34fdc..7e81a7964 100644
          let p1 = (x1 + y * self.width) as usize;
          let p2 = (x2 + y * self.width) as usize;
          let slice = &mut self.pixels[p1..p2];
-@@ -886,20 +1113,61 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -886,20 +1142,61 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn fill(&mut self, color: Color) {
@@ -7855,7 +9118,7 @@ index f1843308c..876d7e637 100644
      }
  }
 diff --git a/core/src/context.rs b/core/src/context.rs
-index 0926945e0..844b86e46 100644
+index 0926945e0..64f389702 100644
 --- a/core/src/context.rs
 +++ b/core/src/context.rs
 @@ -184,7 +184,11 @@ pub struct UpdateContext<'gc> {
@@ -7871,6 +9134,42 @@ index 0926945e0..844b86e46 100644
  
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
+@@ -293,6 +297,35 @@ impl<'gc> UpdateContext<'gc> {
+         self.audio_manager.stop_sound(self.audio, instance)
+     }
+ 
++    /// FlashNX (ruffle#24762): see `AudioManager::start_dynamic_sound`.
++    pub fn start_dynamic_sound(
++        &mut self,
++        avm2_object: SoundChannelObject<'gc>,
++        dynamic_sound: crate::avm2::object::SoundObject<'gc>,
++        dynamic_data: crate::avm2::object::ByteArrayObject<'gc>,
++        dynamic_position: u32,
++        dynamic_start_offset: u32,
++    ) -> Option<SoundInstanceHandle> {
++        self.audio_manager.start_dynamic_sound(
++            self.audio,
++            avm2_object,
++            dynamic_sound,
++            dynamic_data,
++            dynamic_position,
++            dynamic_start_offset,
++        )
++    }
++
++    /// FlashNX (ruffle#24762).
++    pub fn append_dynamic_sound(&mut self, instance: SoundInstanceHandle, samples: &[[i16; 2]]) -> bool {
++        self.audio.append_dynamic_sound(instance, samples)
++    }
++
++    /// FlashNX (ruffle#24762).
++    pub fn finish_dynamic_sound(&mut self, instance: SoundInstanceHandle) -> bool {
++        self.audio.finish_dynamic_sound(instance)
++    }
++
+     pub fn stop_sounds_with_handle(&mut self, sound: SoundHandle) {
+         self.audio_manager
+             .stop_sounds_with_handle(self.audio, sound)
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
 index 2e6e01783..5688087a8 100644
 --- a/core/src/display_object.rs
@@ -10224,7 +11523,7 @@ index 91bdb52df..caf29d1b5 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..59f795e22 100644
+index 6e5379213..5f3df4f35 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -10254,8 +11553,8 @@ index 6e5379213..59f795e22 100644
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use avm2::activation::{
-+    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_direct_calls, set_jit_map,
-+    set_jit_tos_cache,
++    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_crossbridge,
++    set_jit_direct_calls, set_jit_map, set_jit_tos_cache,
 +};
 +pub use avm1::set_avm1_fast_push;
 +
@@ -10960,7 +12259,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..3265fbf7f 100644
+index edb74cccb..07085910c 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -11552,7 +12851,7 @@ index edb74cccb..3265fbf7f 100644
      /// Update the current state of the player.
      ///
      /// The given function will be called with the current stage root, current
-@@ -2382,7 +2888,83 @@ impl Player {
+@@ -2382,7 +2888,95 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -11572,10 +12871,22 @@ index edb74cccb..3265fbf7f 100644
 +        let full_gc_requested = FULL_GC_REQUESTED.swap(false, Ordering::Relaxed);
 +        let dropped_sounds;
 +        if crate::bitmap::bitmap_data::bitmapdata_under_pressure() {
++            let before = crate::bitmap::bitmap_data::bitmapdata_live_bytes();
 +            dropped_sounds = self.collect_full();
++            crate::bitmap::bitmap_data::bitmapdata_note_full_gc();
++            // Said when it costs: a full cycle on a big heap is a visible stall.
++            if gc_t0.elapsed().as_millis() >= 200 {
++                tracing::info!(
++                    "BitmapData pressure: full collection in {} ms, bitmaps {} -> {} MB",
++                    gc_t0.elapsed().as_millis(),
++                    before / (1024 * 1024),
++                    crate::bitmap::bitmap_data::bitmapdata_live_bytes() / (1024 * 1024)
++                );
++            }
 +        } else if full_gc_requested {
 +            let before = self.gc_arena.borrow().metrics().total_allocation();
 +            dropped_sounds = self.collect_full();
++            crate::bitmap::bitmap_data::bitmapdata_note_full_gc();
 +            let after = self.gc_arena.borrow().metrics().total_allocation();
 +            tracing::info!(
 +                "System.gc(): full collection in {} ms, {} -> {} MB",
@@ -11637,7 +12948,7 @@ index edb74cccb..3265fbf7f 100644
  
          rval
      }
-@@ -2956,6 +3538,9 @@ impl PlayerBuilder {
+@@ -2956,6 +3550,9 @@ impl PlayerBuilder {
      pub fn build(self) -> Arc<Mutex<Player>> {
          use crate::backend::*;
          use ruffle_video::null;
@@ -11647,7 +12958,7 @@ index edb74cccb..3265fbf7f 100644
          let audio = self
              .audio
              .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
-@@ -3173,6 +3758,36 @@ pub struct DragObject<'gc> {
+@@ -3173,6 +3770,36 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  
@@ -11722,6 +13033,69 @@ index 80ecf0517..001395fb7 100644
      fn update_texture(
          &mut self,
          handle: &BitmapHandle,
+diff --git a/render/src/utils.rs b/render/src/utils.rs
+index abfc71419..3010d2e4f 100644
+--- a/render/src/utils.rs
++++ b/render/src/utils.rs
+@@ -295,11 +295,17 @@ pub fn decode_define_bits_lossless(
+             out_data
+         }
+         (1 | 2, swf::BitmapFormat::Rgb32) => {
++            // FlashNX: ARGB -> RGBA as a rotation of a u32, the same bytes as
++            // `<[u8]>::rotate_left(1)`, which went through `ptr_rotate`'s
++            // memmove for every pixel: 3.8 s of Super Mario Bros. Crossover's
++            // startup on the console (#136, 4 400 bitmaps).
+             for rgba in decoded_data.chunks_exact_mut(4) {
+-                rgba.rotate_left(1);
++                let argb = u32::from_be_bytes([rgba[0], rgba[1], rgba[2], rgba[3]]);
++                let mut out = argb.rotate_left(8).to_be_bytes();
+                 if !has_alpha {
+-                    rgba[3] = u8::MAX;
++                    out[3] = u8::MAX;
+                 }
++                rgba.copy_from_slice(&out);
+             }
+             decoded_data
+         }
+@@ -494,3 +500,38 @@ fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, Error> {
+     out_data.shrink_to_fit();
+     Ok(out_data)
+ }
++
++#[cfg(test)]
++mod flashnx_tests {
++    use super::decode_define_bits_lossless;
++    use std::io::Write;
++
++    /// FlashNX: RGB32 lossless pixels come out as `<[u8]>::rotate_left(1)`
++    /// made them (ARGB -> RGBA), with alpha forced opaque in version 1.
++    #[test]
++    fn rgb32_swizzle_matches_rotate_left() {
++        let argb: Vec<u8> = (0..64u32).flat_map(|i| (i.wrapping_mul(2654435761)).to_be_bytes()).collect();
++        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
++        z.write_all(&argb).unwrap();
++        let data = z.finish().unwrap();
++        for version in [1u8, 2] {
++            let tag = swf::DefineBitsLossless {
++                version,
++                id: 1,
++                format: swf::BitmapFormat::Rgb32,
++                width: 8,
++                height: 8,
++                data: std::borrow::Cow::Borrowed(&data),
++            };
++            let bitmap = decode_define_bits_lossless(&tag).unwrap();
++            let mut expected = argb.clone();
++            for px in expected.chunks_exact_mut(4) {
++                px.rotate_left(1);
++                if version == 1 {
++                    px[3] = u8::MAX;
++                }
++            }
++            assert_eq!(bitmap.data(), &expected[..], "version {version}");
++        }
++    }
++}
 diff --git a/swf/src/avm1/read.rs b/swf/src/avm1/read.rs
 index 107e0364d..4fb573889 100644
 --- a/swf/src/avm1/read.rs
@@ -12103,6 +13477,877 @@ index 000000000..dbee897f5
 +++ b/tests/tests/swfs/avm2/property_priority_three_level/test.toml
 @@ -0,0 +1 @@
 +num_frames = 1
+diff --git a/tests/tests/swfs/avm2/sound_sample_data/Test.as b/tests/tests/swfs/avm2/sound_sample_data/Test.as
+new file mode 100644
+index 000000000..be90a391e
+--- /dev/null
++++ b/tests/tests/swfs/avm2/sound_sample_data/Test.as
+@@ -0,0 +1,802 @@
++package {
++    import flash.display.Sprite;
++    import flash.events.Event;
++    import flash.events.SampleDataEvent;
++    import flash.events.TimerEvent;
++    import flash.media.Sound;
++    import flash.media.SoundChannel;
++    import flash.media.SoundMixer;
++    import flash.net.URLRequest;
++    import flash.utils.ByteArray;
++    import flash.utils.Timer;
++    import flash.utils.setTimeout;
++
++    public class Test extends Sprite {
++        private var caseIndex:int = 0;
++        private var caseFinished:Boolean = false;
++
++        private var sound:Sound;
++        private var channel:SoundChannel;
++
++        private var eventCount:int = 0;
++        private var completeCount:int = 0;
++
++        private var watchdog:Timer;
++
++        private var soundA:Sound;
++        private var soundB:Sound;
++        private var channelA:SoundChannel;
++        private var channelB:SoundChannel;
++
++        private var countA:int = 0;
++        private var countB:int = 0;
++
++        private var completeA:Boolean = false;
++        private var completeB:Boolean = false;
++
++        public function Test() {
++            trace("SampleDataEvent");
++            setTimeout(runNextCase, 50);
++        }
++
++        private function runNextCase():void {
++            cleanup();
++
++            caseFinished = false;
++            caseIndex++;
++
++            switch (caseIndex) {
++                case 1:
++                    trace("case 1: normal blocks");
++                    testNormalBlocks();
++                    break;
++
++                case 2:
++                    trace("case 2: varying block sizes");
++                    testVaryingSizes();
++                    break;
++
++                case 3:
++                    trace("case 3: short final block");
++                    testShortFinalBlock();
++                    break;
++
++                case 4:
++                    trace("case 4: zero samples");
++                    testZeroSamples();
++                    break;
++
++                case 5:
++                    trace("case 5: SoundChannel.stop");
++                    testStop();
++                    break;
++
++                case 6:
++                    trace("case 6: stereo");
++                    testStereo();
++                    break;
++
++                case 7:
++                    trace("case 7: multiple sounds");
++                    testMultipleSounds();
++                    break;
++
++                case 8:
++                    trace("case 8: play arguments");
++                    testPlayArguments();
++                    break;
++
++                case 9:
++                    trace("case 9: SoundMixer.stopAll");
++                    testSoundMixerStopAll();
++                    break;
++
++                case 10:
++                    trace("case 10: generated sound lifecycle");
++                    testGeneratedSoundLifecycle();
++                    break;
++
++                case 11:
++                    trace("case 11: generated sound limit");
++                    testGeneratedSoundLimit();
++                    break;
++
++                default:
++                    trace("done");
++                    break;
++            }
++        }
++
++        private function nextSoon(delay:int = 100):void {
++            if (caseFinished) {
++                return;
++            }
++
++            caseFinished = true;
++            setTimeout(runNextCase, delay);
++        }
++
++        private function cleanup():void {
++            stopWatchdog();
++
++            if (channel != null) {
++                try {
++                    channel.stop();
++                } catch (e:Error) {
++                }
++            }
++
++            if (channelA != null) {
++                try {
++                    channelA.stop();
++                } catch (e1:Error) {
++                }
++            }
++
++            if (channelB != null) {
++                try {
++                    channelB.stop();
++                } catch (e2:Error) {
++                }
++            }
++
++            sound = null;
++            channel = null;
++
++            soundA = null;
++            soundB = null;
++
++            channelA = null;
++            channelB = null;
++
++            eventCount = 0;
++            completeCount = 0;
++
++            countA = 0;
++            countB = 0;
++
++            completeA = false;
++            completeB = false;
++
++            caseFinished = false;
++        }
++
++        private function startWatchdog(
++            ms:int,
++            label:String
++        ):void {
++            stopWatchdog();
++
++            watchdog = new Timer(ms, 1);
++            watchdog.addEventListener(
++                TimerEvent.TIMER_COMPLETE,
++                function(e:TimerEvent):void {
++                    trace(label + " timeout");
++                    nextSoon();
++                }
++            );
++            watchdog.start();
++        }
++
++        private function stopWatchdog():void {
++            if (watchdog != null) {
++                watchdog.stop();
++                watchdog = null;
++            }
++        }
++
++        private function writeSilence(
++            data:ByteArray,
++            samples:int
++        ):void {
++            for (var i:int = 0; i < samples; i++) {
++                data.writeFloat(0.0);
++                data.writeFloat(0.0);
++            }
++        }
++
++        private function writeAndTrace(
++            name:String,
++            e:SampleDataEvent,
++            samples:int,
++            eventNumber:int
++        ):void {
++            var beforePosition:uint = e.data.position;
++            var beforeLength:uint = e.data.length;
++
++            writeSilence(e.data, samples);
++
++            trace(
++                name +
++                " event=" + eventNumber +
++                " position=" + e.position +
++                " samples=" + samples +
++                " beforePosition=" + beforePosition +
++                " beforeLength=" + beforeLength +
++                " afterPosition=" + e.data.position +
++                " afterLength=" + e.data.length
++            );
++        }
++
++        private function onComplete(e:Event):void {
++            completeCount++;
++
++            trace(
++                "soundComplete" +
++                " count=" + completeCount +
++                " events=" + eventCount
++            );
++
++            stopWatchdog();
++            nextSoon();
++        }
++
++        // Normal 4096-sample blocks and ByteArray reuse.
++
++        private function testNormalBlocks():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onNormalSampleData
++            );
++
++            channel = sound.play();
++
++            startWatchdog(3000, "normal");
++        }
++
++        private function onNormalSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            writeAndTrace(
++                "normal",
++                e,
++                4096,
++                eventCount
++            );
++
++            if (eventCount == 5) {
++                if (channel != null) {
++                    channel.stop();
++                }
++
++                trace("normal stopped events=" + eventCount);
++                nextSoon();
++            }
++        }
++
++        // Different legal SampleData buffer sizes.
++
++        private function testVaryingSizes():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onVaryingSampleData
++            );
++
++            channel = sound.play();
++
++            startWatchdog(4000, "varying");
++        }
++
++        private function onVaryingSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            var sizes:Array = [
++                2048,
++                4096,
++                8192,
++                4096
++            ];
++
++            var samples:int = int(sizes[eventCount - 1]);
++
++            writeAndTrace(
++                "varying",
++                e,
++                samples,
++                eventCount
++            );
++
++            if (eventCount == sizes.length) {
++                if (channel != null) {
++                    channel.stop();
++                }
++
++                trace("varying stopped events=" + eventCount);
++                nextSoon();
++            }
++        }
++
++        // Writing fewer than 2048 samples ends the dynamic stream.
++
++        private function testShortFinalBlock():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onShortFinal
++            );
++
++            channel = sound.play();
++
++            if (channel != null) {
++                channel.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        completeCount++;
++
++                        trace(
++                            "short-final complete events=" +
++                            eventCount
++                        );
++
++                        stopWatchdog();
++                        nextSoon();
++                    }
++                );
++            }
++
++            startWatchdog(4000, "short-final");
++        }
++
++        private function onShortFinal(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            var samples:int =
++                eventCount <= 3 ? 4096 : 1024;
++
++            writeAndTrace(
++                "short-final",
++                e,
++                samples,
++                eventCount
++            );
++        }
++
++        // Writing zero samples ends the dynamic stream.
++
++        private function testZeroSamples():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onZeroSampleData
++            );
++
++            channel = sound.play();
++
++            if (channel != null) {
++                channel.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        completeCount++;
++
++                        trace(
++                            "zero complete events=" +
++                            eventCount +
++                            " completes=" +
++                            completeCount
++                        );
++                    }
++                );
++            }
++
++            startWatchdog(1500, "zero");
++
++            setTimeout(
++                function():void {
++                    stopWatchdog();
++
++                    trace(
++                        "zero final events=" +
++                        eventCount +
++                        " completes=" +
++                        completeCount
++                    );
++
++                    nextSoon();
++                },
++                700
++            );
++        }
++
++        private function onZeroSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            writeAndTrace(
++                "zero",
++                e,
++                0,
++                eventCount
++            );
++        }
++
++        // SoundChannel.stop() stops further SampleData callbacks.
++
++        private function testStop():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onStopSampleData
++            );
++
++            channel = sound.play();
++
++            setTimeout(
++                function():void {
++                    var eventsAtStop:int = eventCount;
++
++                    if (channel != null) {
++                        channel.stop();
++                    }
++
++                    setTimeout(
++                        function():void {
++                            trace(
++                                "stop no-more-events=" +
++                                (eventCount == eventsAtStop)
++                            );
++
++                            nextSoon();
++                        },
++                        500
++                    );
++                },
++                300
++            );
++        }
++
++        private function onStopSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++            writeSilence(e.data, 4096);
++        }
++
++        // Stereo data consists of left/right float sample pairs.
++
++        private function testStereo():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onStereoSampleData
++            );
++
++            channel = sound.play();
++
++            if (channel != null) {
++                channel.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        trace(
++                            "stereo complete events=" +
++                            eventCount
++                        );
++
++                        stopWatchdog();
++                        nextSoon();
++                    }
++                );
++            }
++
++            startWatchdog(4000, "stereo");
++        }
++
++        private function onStereoSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            var samples:int =
++                eventCount <= 5 ? 2048 : 1024;
++
++            for (var i:int = 0; i < samples; i++) {
++                var left:Number = 0.0;
++                var right:Number = 0.0;
++
++                if (eventCount == 1) {
++                    left = 0.5;
++                } else if (eventCount == 2) {
++                    right = 0.5;
++                } else if (eventCount == 3) {
++                    left = 0.5;
++                    right = -0.5;
++                }
++
++                e.data.writeFloat(left);
++                e.data.writeFloat(right);
++            }
++
++            if (samples < 2048) {
++                trace(
++                    "stereo final position=" +
++                    e.position +
++                    " samples=" +
++                    samples
++                );
++            }
++        }
++
++        // Multiple dynamic sounds keep independent stream state.
++
++        private function testMultipleSounds():void {
++            soundA = new Sound();
++            soundB = new Sound();
++
++            soundA.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onSampleA
++            );
++
++            soundB.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onSampleB
++            );
++
++            channelA = soundA.play();
++            channelB = soundB.play();
++
++            if (channelA != null) {
++                channelA.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        completeA = true;
++                        checkMultipleComplete();
++                    }
++                );
++            }
++
++            if (channelB != null) {
++                channelB.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        completeB = true;
++                        checkMultipleComplete();
++                    }
++                );
++            }
++
++            startWatchdog(5000, "multiple");
++        }
++
++        private function onSampleA(
++            e:SampleDataEvent
++        ):void {
++            countA++;
++
++            var samples:int =
++                countA <= 3 ? 2048 : 1024;
++
++            writeSilence(e.data, samples);
++        }
++
++        private function onSampleB(
++            e:SampleDataEvent
++        ):void {
++            countB++;
++
++            var samples:int =
++                countB <= 3 ? 4096 : 1024;
++
++            writeSilence(e.data, samples);
++        }
++
++        private function checkMultipleComplete():void {
++            if (!completeA || !completeB) {
++                return;
++            }
++
++            stopWatchdog();
++
++            trace(
++                "multiple complete" +
++                " A.events=" + countA +
++                " B.events=" + countB
++            );
++
++            nextSoon();
++        }
++
++        // startTime affects SampleDataEvent.position after playback begins.
++        // Callback timing before Sound.play() returns is platform-dependent.
++
++        private function testPlayArguments():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onPlayArgumentsSampleData
++            );
++
++            channel = sound.play(500, 3);
++
++            if (channel != null) {
++                channel.addEventListener(
++                    Event.SOUND_COMPLETE,
++                    function(e:Event):void {
++                        trace(
++                            "play-arguments complete events=" +
++                            eventCount
++                        );
++
++                        stopWatchdog();
++                        nextSoon();
++                    }
++                );
++            }
++
++            startWatchdog(4000, "play-arguments");
++        }
++
++        private function onPlayArgumentsSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++
++            var samples:int =
++                eventCount <= 3 ? 4096 : 1024;
++
++            writeSilence(e.data, samples);
++
++            if (samples < 2048) {
++                trace(
++                    "play-arguments final position=" +
++                    e.position +
++                    " samples=" +
++                    samples
++                );
++            }
++        }
++
++        // SoundMixer.stopAll() stops further SampleData callbacks.
++
++        private function testSoundMixerStopAll():void {
++            sound = new Sound();
++
++            sound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onMixerSampleData
++            );
++
++            channel = sound.play();
++
++            setTimeout(
++                function():void {
++                    var eventsAtStop:int = eventCount;
++
++                    SoundMixer.stopAll();
++
++                    setTimeout(
++                        function():void {
++                            trace(
++                                "stopAll no-more-events=" +
++                                (eventCount == eventsAtStop)
++                            );
++
++                            nextSoon();
++                        },
++                        500
++                    );
++                },
++                300
++            );
++        }
++
++        private function onMixerSampleData(
++            e:SampleDataEvent
++        ):void {
++            eventCount++;
++            writeSilence(e.data, 4096);
++        }
++
++
++        // Once an unloaded Sound has been used for generated audio,
++        // Flash does not allow load() to be called on it.
++
++        private function testGeneratedSoundLifecycle():void {
++            var generatedSound:Sound = new Sound();
++
++            generatedSound.addEventListener(
++                SampleDataEvent.SAMPLE_DATA,
++                onGeneratedLifecycleSampleData
++            );
++
++            var firstChannel:SoundChannel =
++                generatedSound.play();
++
++            var secondChannel:SoundChannel =
++                generatedSound.play();
++
++            trace(
++                "generated-lifecycle same-channel=" +
++                (firstChannel == secondChannel)
++            );
++
++            try {
++                generatedSound.load(
++                    new URLRequest("missing.mp3")
++                );
++
++                trace(
++                    "generated-lifecycle load succeeded"
++                );
++            } catch (e:Error) {
++                trace(
++                    "generated-lifecycle load error=" +
++                    e.errorID
++                );
++            }
++
++            if (firstChannel != null) {
++                firstChannel.stop();
++            }
++
++            if (secondChannel != null) {
++                secondChannel.stop();
++            }
++
++            nextSoon();
++        }
++
++        private function onGeneratedLifecycleSampleData(
++            e:SampleDataEvent
++        ):void {
++            writeSilence(e.data, 4096);
++        }
++
++        // Flash allows at most 32 simultaneously playing generated sounds.
++        // Further Sound.play() calls return null.
++
++        private function testGeneratedSoundLimit():void {
++            var channels:int = 0;
++            var nulls:int = 0;
++
++            for (var i:int = 0; i < 100; i++) {
++                var generatedSound:Sound = new Sound();
++
++                generatedSound.addEventListener(
++                    SampleDataEvent.SAMPLE_DATA,
++                    onGeneratedLimitSampleData
++                );
++
++                var generatedChannel:SoundChannel =
++                    generatedSound.play();
++
++                if (generatedChannel != null) {
++                    channels++;
++                } else {
++                    nulls++;
++                }
++            }
++
++            trace(
++                "generated-limit channels=" +
++                channels +
++                " nulls=" +
++                nulls
++            );
++
++            SoundMixer.stopAll();
++            nextSoon();
++        }
++
++        private function onGeneratedLimitSampleData(
++            e:SampleDataEvent
++        ):void {
++            writeSilence(e.data, 4096);
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/sound_sample_data/output.txt b/tests/tests/swfs/avm2/sound_sample_data/output.txt
+new file mode 100644
+index 000000000..13f38085b
+--- /dev/null
++++ b/tests/tests/swfs/avm2/sound_sample_data/output.txt
+@@ -0,0 +1,42 @@
++SampleDataEvent
++case 1: normal blocks
++normal event=1 position=0 samples=4096 beforePosition=0 beforeLength=0 afterPosition=32768 afterLength=32768
++normal event=2 position=4096 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++normal event=3 position=8192 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++normal event=4 position=12288 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++normal event=5 position=16384 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++normal stopped events=5
++case 2: varying block sizes
++varying event=1 position=0 samples=2048 beforePosition=0 beforeLength=0 afterPosition=16384 afterLength=16384
++varying event=2 position=2048 samples=4096 beforePosition=0 beforeLength=16384 afterPosition=32768 afterLength=32768
++varying event=3 position=6144 samples=8192 beforePosition=0 beforeLength=32768 afterPosition=65536 afterLength=65536
++varying event=4 position=14336 samples=4096 beforePosition=0 beforeLength=65536 afterPosition=32768 afterLength=65536
++varying stopped events=4
++case 3: short final block
++short-final event=1 position=0 samples=4096 beforePosition=0 beforeLength=0 afterPosition=32768 afterLength=32768
++short-final event=2 position=4096 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++short-final event=3 position=8192 samples=4096 beforePosition=0 beforeLength=32768 afterPosition=32768 afterLength=32768
++short-final event=4 position=12288 samples=1024 beforePosition=0 beforeLength=32768 afterPosition=8192 afterLength=32768
++short-final complete events=4
++case 4: zero samples
++zero event=1 position=0 samples=0 beforePosition=0 beforeLength=0 afterPosition=0 afterLength=0
++zero complete events=1 completes=1
++zero final events=1 completes=1
++case 5: SoundChannel.stop
++stop no-more-events=true
++case 6: stereo
++stereo final position=10240 samples=1024
++stereo complete events=6
++case 7: multiple sounds
++multiple complete A.events=4 B.events=4
++case 8: play arguments
++play-arguments final position=34338 samples=1024
++play-arguments complete events=4
++case 9: SoundMixer.stopAll
++stopAll no-more-events=true
++case 10: generated sound lifecycle
++generated-lifecycle same-channel=false
++generated-lifecycle load error=2037
++case 11: generated sound limit
++generated-limit channels=32 nulls=68
++done
+diff --git a/tests/tests/swfs/avm2/sound_sample_data/test.swf b/tests/tests/swfs/avm2/sound_sample_data/test.swf
+new file mode 100644
+index 000000000..8cb50f054
+Binary files /dev/null and b/tests/tests/swfs/avm2/sound_sample_data/test.swf differ
+diff --git a/tests/tests/swfs/avm2/sound_sample_data/test.toml b/tests/tests/swfs/avm2/sound_sample_data/test.toml
+new file mode 100644
+index 000000000..b3a471cdb
+--- /dev/null
++++ b/tests/tests/swfs/avm2/sound_sample_data/test.toml
+@@ -0,0 +1,5 @@
++num_ticks = 300
++sleep_to_meet_frame_rate = true
++
++[player_options]
++with_audio = true
 diff --git a/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt b/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt
 index 7b84f0cc0..84f9724d2 100644
 --- a/tests/tests/swfs/avm2/swf_9_goto_in_construct_frame/output.ruffle.txt

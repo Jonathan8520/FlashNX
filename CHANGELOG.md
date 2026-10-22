@@ -4,8 +4,20 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## Unreleased
 
+### Added
+
+- **Sound that games make while they play** (#136). A game can compute its sound in ActionScript instead of playing recorded files (`SampleDataEvent`); FlashNX had no support for it, so such games were silent. Super Mario Bros. Crossover makes all its music and sound effects this way: they play now.
+
+### Performance
+
+- **Games start sooner**: one kind of image games embed (32-bit lossless) was converted pixel by pixel through a slow copy. Super Mario Bros. Crossover's 4 400 images: 2 seconds less.
+- **More ActionScript 3 runs as native code**: memory reads and writes, whole-number arithmetic and calls in code compiled from C or C++ for Flash (FlasCC, Alchemy, as in emulators and physics engines), and loops check the script time limit less often.
+
 ### Fixed
 
+- **Super Mario Bros. Crossover starts and plays** (#136), past its unpacking (below): it reaches its title screen in under a minute and plays at full speed with its NES music. Its SNES music is emulated as it plays and is too heavy for the console: with it the game runs at about 20 fps and the music has gaps.
+- **XML full of "&" no longer takes minutes to read** (#136). Text with many "&" and no ";" after them slowed FlashNX's XML reader down with the square of its length: Super Mario Bros. Crossover's level files (7.7 MB, 320 000 "&") took minutes, and now take an instant.
+- **Games that keep many images in memory no longer run at 1 fps** (#136). Past 192 MB of images, a protection against running out of memory cleaned the whole memory on every frame, even when every image was in use: Super Mario Bros. Crossover's title screen ran at 1 fps. It now cleans up only when images pile up.
 - **Games that decompress themselves on their loading screen now start.** Some games ship packed inside a small loader, apparat's Matryoshka, that decompresses them in ActionScript: Ruffle never reached the end, stopped the script after 60 seconds and the game stayed on its loading screen for good (Glorg stayed on "decrunching"). FlashNX now decompresses them itself, in a second or two.
 
 ## v2.0.2 (2026-10-21)

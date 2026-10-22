@@ -1891,6 +1891,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !jit_tos {
         log(b"jit: jittos.off present -> no stack cache in compiled code\n\0");
     }
+    // `sdmc:/switch/FlashNX/jitcb.off`: compiled code without its paths for
+    // CrossBridge code (inline domain memory and int ops, scopes of `this`,
+    // direct calls to bound methods), see `set_jit_crossbridge`.
+    let jit_cb = !backend::render::marker_present("jitcb.off");
+    ruffle_core::set_jit_crossbridge(jit_cb);
+    if !jit_cb {
+        log(b"jit: jitcb.off present -> no CrossBridge paths in compiled code\n\0");
+    }
     // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
     // list again in enterFrame, frame construction and frame scripts (see
     // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.

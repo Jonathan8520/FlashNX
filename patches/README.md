@@ -469,6 +469,116 @@ then plays at full speed (v2.0.2 stopped its script after 60 s and it stayed
 on its "decrunching" screen for good). SMBC gets past its loading screen and stops later,
 on the speed of its FlasCC-compiled music emulator (libgme): about 130 s of
 ActionScript to record its sound effects at startup, cut by the 60 s limit.
+(That last reading was wrong: see the next entry. The profile put 81 % of
+that startup in the XML parser, not in libgme.)
+
+**`core/common/src/xml.rs`: XML entities found in one pass (FlashNX #136,
+upstream ruffle#21623).**
+
+`avm1_unescape` / `avm2_unescape` found the entities with the expressions
+`&[^;&]*;` / `&[^;]*;` on regress, a backtracking engine: on a text with many
+'&' and no ';' after them, every '&' ran its `[^;]*` to the end of the text
+and backtracked all the way. Super Mario Bros. Crossover parses three level
+files at startup, 7.75 MB of map text with 320 000 '&'
+(`groundBlock&&HideOnDifficulties=easynormal`) and no ';': 81 % of the
+console's samples of its startup were there. `next_entity` finds the same
+spans in one linear scan ('&' and ';' are ASCII, so byte positions are
+character boundaries): on a PC, 65.8 s with the expression, 7.8 ms now, same
+output. A unit test compares both on every string of up to 7 characters over
+`& ; a é` (21 844 strings, both modes); the `xml` (99) and `e4x` (177)
+regression tests pass.
+
+**`core/src/bitmap/bitmap_data.rs`, `player.rs`: the BitmapData pressure
+rule forces a full collection only after the bytes grew (FlashNX #136).**
+
+Past half the BitmapData budget, `update` ran a full collection instead of
+paying the incremental debt (New Super Bowser World's strips). A game whose
+bitmaps are simply alive past it got one on every `update`, freeing nothing:
+Super Mario Bros. Crossover keeps ~350 MB of them (4 400 bitmaps), ~1 s of
+collection per frame, 1 fps on its title screen. Now only when the live bytes
+grew by 32 MB since the last full collection or since their lowest point
+(New Super Bowser World climbed by 20-70 MB steps); a full collection over
+200 ms says so in the log. SMBC: 60 fps, with a full collection of ~1 s every
+40-60 s, each freeing ~30 MB of bitmaps it dropped.
+
+**`core/src/avm2/globals/flash/media/sound.rs`, `avm2/object/sound_object.rs`,
+`backend/audio.rs`, `backend/audio/mixer.rs`, `context.rs`: `SampleDataEvent`
+(backport of upstream PR ruffle#24762, closed unmerged).**
+
+A Sound played with no audio loaded is fed by its `sampleData` listener: a
+first event from `play`, the next ones from `AudioManager::update_sounds`
+while fewer than 8192 frames are queued, a block under 2048 frames ending it,
+in the mixer as a `DynamicSoundStream`. Taken from the PR, which was compared
+against Flash Player (its `sound_sample_data` test is added and passes, minus
+the `[[compilers]]` section our harness does not know), with four changes:
+the `AudioBackend` methods have defaults (backends without a mixer play
+nothing), the floats are read in the ByteArray's own byte order, a Sound
+already `Generated` plays again the same way, and the stream goes through
+`make_resampler` like every other one (the PR played the 44.1 kHz frames as
+they were: 8.8 % too fast on the console's 48 kHz output). Super Mario Bros.
+Crossover plays all its music this way, through one Sound per player: with
+`New` alone, the title music played and every level was silent.
+
+Its music comes from libgme compiled by FlasCC (371 SPC, 30 NSF, 20 GBS files
+in the SWF), emulated as it plays. NES music keeps 60 fps; SNES music does
+not: `Spc_Dsp::run` is half of those frames, all of it compiled code (no
+helper left), and each 8192-frame block takes 150-200 ms, so the game runs at
+~22 fps with gaps in the music. A refill threshold of 16384 was tried: the
+emulator being no faster than real time there, the queue never got above it
+and every frame paid a block (5 fps). Back to 8192.
+
+**`core/src/avm2/activation_jit.rs`, `avm2/bytearray.rs`,
+`avm2/object/bytearray_object.rs`, `avm2/domain.rs`: compiled code for
+CrossBridge (FlasCC / Alchemy) code, `jitcb.off` to compare.**
+
+- Domain memory inline (`li8/16/32`, `lf32/64`, `si8/16/32`, `sf32/64`): an
+  int address in range of a view (`Ctx::dm_*`) that `h_dm` takes from the
+  activation's domain memory, valid while `FLASHNX_BYTES_GEN` does not move.
+  That counter moves on every `ByteArrayObject::storage_mut` (any write may
+  move or resize the bytes, including FlashNX's copy on write of shared
+  bytes) and when a domain's memory is replaced; taking a view moves it only
+  when shared bytes had to be copied. Anything else is the op's helper.
+- Int ops inline on two ints: `bitand/or/xor`, `lshift/rshift/urshift` (a
+  `urshift` above int range is the helper's Number), `bitnot`, `coerce_u` of
+  a non-negative int, `sxi1/8/16`; `setslot_coerce_i` of an int is
+  `setslot_no_coerce`.
+- `getscopeobject` below the scopes the prologue pushed from local 0
+  (`getlocal0, dup, pushscope, pushscope`, CrossBridge's) reads local 0 when
+  the method has no other scope op and never writes local 0 (what upstream's
+  ruffle#24236 does in the optimizer).
+- `fast_call` no longer refuses a method with a bound method on its receiver:
+  `call_method_with_args` would call that bound method, bound from the same
+  vtable entry to the same receiver with the same scope and superclass, which
+  differs only as an `arguments` object's callee (refused anyway).
+CrossBridge code takes the address of its functions (function pointers, C++
+vtables), which binds them.
+
+**Same file: backward branches poll the time limit once in 64.** Compiled
+code called `h_timeout` on every backward branch (~2.5 % of SMBC's startup);
+it now counts down in `Ctx::poll` and calls it once in `POLL_EVERY`, which
+adds the 63 others to `actions_since_timeout_check`: the clock and the pause
+are looked at as often as before.
+
+**Same file: an int `add`, `subtract` or `multiply` that overflows makes its
+Number inline** (the interpreter's: the ints as doubles, then the operation;
+exact for the first two), and `sf32` / `sf64` of an int convert it inline
+(`coerce_to_number`). At SMBC's startup the `jit:` line went from 1.05
+billion helper calls to 96 million with the CrossBridge paths, then the
+largest remaining were these (`Multiply` 19 M, `Sf64` 25 M).
+
+**Same file, measuring: why `fast_call` took the slow path** (`slow [...]` on
+the `jit:` line, with the callee of one call in 1024 of each kind) and the
+name of every compiled method in the profiling build's `jitmap.txt`
+(`<address> @ <method>` lines, which `jit_ops.py` skips; read by
+`temp/perf-tools/jit_methods.py`, `jit_methods_frames.py`,
+`jit_method_ops.py`). SMBC's slow calls are natives (27 M at startup, mostly
+`ByteArray.position` and `readFloat`), not the bound methods.
+
+**`render/src/utils.rs`: `DefineBitsLossless` RGB32 pixels swizzled as a
+`u32` rotation.** `<[u8]>::rotate_left(1)` on each 4-byte pixel went through
+`ptr_rotate`'s memmove: 3.8 s of SMBC's startup (4 400 bitmaps); its first
+frame went from 8.4 s to 6.2 s. Same bytes (unit test against the old code,
+both versions of the tag). Upstream still has it.
 
 **Super Smash Flash 2, October 2026: memory and speed.** Measured on the
 console over a dozen sessions; the full suite (host build, GNU toolchain)
