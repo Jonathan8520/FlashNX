@@ -1899,6 +1899,20 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !jit_cb {
         log(b"jit: jitcb.off present -> no CrossBridge paths in compiled code\n\0");
     }
+    // `sdmc:/switch/FlashNX/jitint.off`: compiled code keeps every int in its
+    // `Value`, tag checked at each op, as before typed ints (`set_jit_ints`).
+    let jit_ints = !backend::render::marker_present("jitint.off");
+    ruffle_core::set_jit_ints(jit_ints);
+    if !jit_ints {
+        log(b"jit: jitint.off present -> no typed ints in compiled code\n\0");
+    }
+    // `sdmc:/switch/FlashNX/jitcheck.off`: typed code trusts its proofs
+    // without checking the tag of each int it reads (`set_jit_check`).
+    let jit_check = !backend::render::marker_present("jitcheck.off");
+    ruffle_core::set_jit_check(jit_check);
+    if !jit_check {
+        log(b"jit: jitcheck.off present -> typed ints not checked\n\0");
+    }
     // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
     // list again in enterFrame, frame construction and frame scripts (see
     // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.

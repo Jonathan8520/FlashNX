@@ -574,6 +574,49 @@ name of every compiled method in the profiling build's `jitmap.txt`
 `jit_method_ops.py`). SMBC's slow calls are natives (27 M at startup, mostly
 `ByteArray.position` and `readFloat`), not the bound methods.
 
+**Same file: ints out of their `Value`s (`analyze`, `Typer`), `jitint.off`
+to compare, `jitcheck.off` to stop checking.** Before a method is compiled, a
+forward dataflow over its ops (types meeting at branch targets, to a
+fixpoint) proves which stack slots and locals always hold a
+`Value::Integer`: the results of ops that only push those, locals only ever
+set to one, parameters declared `int`. Ops on them run on registers (x22-x28,
+callee-saved, saved by the prologue of a method that uses them) with no tag
+check, on a virtual operand stack that lives within a block: everything is
+written back as the interpreter would hold it at branch targets, before an
+untyped op and before any helper call.
+
+- `add`, `subtract`, `multiply`, `urshift` whose only reader takes
+  `ToInt32` / `ToUint32` of them (CrossBridge's `add` then `convert_i`,
+  `li16`, `si8`...) are computed on 32 bits. Exact while the exact values
+  stay under 2^53, where every double the interpreter computes is exact
+  (bounds kept in bits per value); a product of two ints past it is rounded
+  to a double as the interpreter rounds it (`smull`, `scvtf`, `fcvtzs`).
+  Written back, such a value is the `Value::Integer` of its 32 bits, which
+  its only reader takes the same.
+- A comparison of two ints read by the next `iftrue` / `iffalse`: one `cmp`,
+  one `b.cond`.
+- Domain memory ops check the view once per block. Their errors, and a view
+  that cannot be taken, go out of the way to the op's helper and then to the
+  interpreter for the rest of the call (`h_deopt`, status 3).
+- `check` (on for now) reads the tag of every int typed code takes from the
+  frame; a wrong proof is counted on the `jit:` line (`ints ... wrong [...]`,
+  by method and op) and its method interpreted.
+- The profiling build's A/B now compares typed and untyped code (the second
+  compilation keeps its ints in `Value`s, stack cache on).
+
+PC test `typed_tests`: the analysis on CrossBridge-like code, and its code
+written for `aarch64-none-elf-objdump`.
+
+On the console, Super Mario Bros. Crossover with SNES music at 1785 MHz went
+from 23 fps (medians; 2.1 s of script per 60 frames) to 54 fps (0.6 s), the
+music without gaps; 60 % of the compiled ops are typed, no wrong proof
+and no deopt there nor in nine other AS3 games (Happy Wheels, Papa Louie 3,
+Super Meat Boy...). The first console run stopped SMBC at its start: a
+`Local` entry left under the untyped code's stack cache read the local
+again after the op, and `Enum()`'s `getlocal 4, kill 4, setproperty`
+stored undefined. The untyped code now owns that entry (test
+`local_killed_under_it`).
+
 **`render/src/utils.rs`: `DefineBitsLossless` RGB32 pixels swizzled as a
 `u32` rotation.** `<[u8]>::rotate_left(1)` on each 4-byte pixel went through
 `ptr_rotate`'s memmove: 3.8 s of SMBC's startup (4 400 bitmaps); its first

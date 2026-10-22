@@ -1566,7 +1566,7 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..01e366f33 100644
+index ed1ff3034..2e272a6e1 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -1579,7 +1579,7 @@ index ed1ff3034..01e366f33 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,126 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,144 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -1657,8 +1657,26 @@ index ed1ff3034..01e366f33 100644
 +    let _ = on;
 +}
 +
-+/// FlashNX, profiling build: compile every method a second time without the
-+/// stack cache (`dual`), and run that second code (`alt`) in the A/B's other
++/// FlashNX: compiled code keeps ints out of their `Value`s where it can
++/// prove them (on by default; `jitint.off`), see `activation_jit::Typer`.
++pub fn set_jit_ints(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_ints(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
++/// FlashNX: that typed code checks each int it reads from the frame (on by
++/// default; `jitcheck.off`), see `activation_jit::set_check`.
++pub fn set_jit_check(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_check(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
++/// FlashNX, profiling build: compile every method a second time without
++/// typed ints (`dual`), and run that second code (`alt`) in the A/B's other
 +/// windows.
 +pub fn set_jit_ab(dual: bool, alt: bool) {
 +    #[cfg(feature = "flashnx_jit")]
@@ -1706,7 +1724,7 @@ index ed1ff3034..01e366f33 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +256,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +274,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -1715,7 +1733,7 @@ index ed1ff3034..01e366f33 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +280,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +298,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -1724,7 +1742,7 @@ index ed1ff3034..01e366f33 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +335,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +353,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -1740,7 +1758,7 @@ index ed1ff3034..01e366f33 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +469,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +487,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -1765,7 +1783,7 @@ index ed1ff3034..01e366f33 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +571,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +589,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -1774,7 +1792,7 @@ index ed1ff3034..01e366f33 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +652,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +670,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -1791,7 +1809,7 @@ index ed1ff3034..01e366f33 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +786,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +804,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -1815,7 +1833,7 @@ index ed1ff3034..01e366f33 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +810,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +828,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -1831,7 +1849,7 @@ index ed1ff3034..01e366f33 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,12 +1108,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,12 +1126,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -1854,7 +1872,7 @@ index ed1ff3034..01e366f33 100644
          }
          Ok(())
      }
-@@ -2023,6 +2194,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2212,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -1865,7 +1883,7 @@ index ed1ff3034..01e366f33 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2247,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2265,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -1892,7 +1910,7 @@ index ed1ff3034..01e366f33 100644
  
          Ok(())
      }
-@@ -2134,8 +2321,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2339,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1903,7 +1921,7 @@ index ed1ff3034..01e366f33 100644
  
          Ok(())
      }
-@@ -2151,8 +2339,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2357,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1914,7 +1932,7 @@ index ed1ff3034..01e366f33 100644
  
          Ok(())
      }
-@@ -2175,8 +2364,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2382,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1925,7 +1943,7 @@ index ed1ff3034..01e366f33 100644
  
          Ok(())
      }
-@@ -2274,6 +2464,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2482,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1934,7 +1952,7 @@ index ed1ff3034..01e366f33 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2480,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2498,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -1960,10 +1978,10 @@ index ed1ff3034..01e366f33 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..7164463c5
+index 000000000..95d62ee9f
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,2381 @@
+@@ -0,0 +1,3866 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -2034,6 +2052,10 @@ index 000000000..7164463c5
 +const KINDS: usize = 160;
 +/// Domain memory view for the inline `li*` / `si*` ops (`h_dm`).
 +const H_DM: usize = 246;
++/// `check` found no int where `analyze` proved one.
++const H_TYPEFAIL: usize = 244;
++/// Typed code gives the rest of the call to the interpreter.
++const H_DEOPT: usize = 245;
 +/// `lookupswitch`'s index (`h_switch`).
 +const H_SWITCH: usize = 247;
 +const H_ARRAY_GET: usize = 248;
@@ -2072,6 +2094,23 @@ index 000000000..7164463c5
 +
 +pub fn set_crossbridge(on: bool) {
 +    CROSSBRIDGE.store(on, AtomicOrdering::Relaxed);
++}
++
++/// Ints out of their `Value`s where `analyze` proves them (`Typer`), with
++/// the CrossBridge paths. Off from the `jitint.off` marker.
++static INTS: AtomicBool = AtomicBool::new(true);
++
++pub fn set_ints(on: bool) {
++    INTS.store(on, AtomicOrdering::Relaxed);
++}
++
++/// Typed code checks the tag of every int it reads from the frame
++/// (`Cold::TypeFail`): a wrong proof is counted and its method interpreted.
++/// Off from the `jitcheck.off` marker.
++static CHECK: AtomicBool = AtomicBool::new(true);
++
++pub fn set_check(on: bool) {
++    CHECK.store(on, AtomicOrdering::Relaxed);
 +}
 +
 +pub fn set_dual(on: bool) {
@@ -2151,6 +2190,12 @@ index 000000000..7164463c5
 +    /// `h_dm`: domain memory views taken, and refused (bytes borrowed).
 +    dm_views: u64,
 +    dm_refused: u64,
++    /// Ops compiled typed (`Typer`), of all compiled.
++    typed_ops: u64,
++    all_ops: u64,
++    /// `check`: ints `analyze` proved and were not, by method and op.
++    typefails: u64,
++    typefail_ops: FnvHashMap<String, u64>,
 +    /// Why `fast_call` handed a call to the interpreter's path (`SLOW_WHY`),
 +    /// and the callees of one call in 1024 of each kind, by name.
 +    slow_why: [u64; SLOW_WHY.len()],
@@ -2260,6 +2305,10 @@ index 000000000..7164463c5
 +            calls_slow: 0,
 +            dm_views: 0,
 +            dm_refused: 0,
++            typed_ops: 0,
++            all_ops: 0,
++            typefails: 0,
++            typefail_ops: FnvHashMap::default(),
 +            slow_why: [0; SLOW_WHY.len()],
 +            slow_names: FnvHashMap::default(),
 +            layout: Layout::default(),
@@ -2571,6 +2620,37 @@ index 000000000..7164463c5
 +    fn add_xi(&mut self, rd: u32, rn: u32, imm: u32) {
 +        self.e(0x9100_0000 | imm << 10 | rn << 5 | rd);
 +    }
++    /// w<rd> = v, in one or two instructions.
++    fn mov_w(&mut self, rd: u32, v: i32) {
++        let u = v as u32;
++        if u >> 16 == 0 {
++            self.e(0x5280_0000 | u << 5 | rd); // movz
++        } else if !u >> 16 == 0 {
++            self.e(0x1280_0000 | (!u) << 5 | rd); // movn
++        } else {
++            self.e(0x5280_0000 | (u & 0xFFFF) << 5 | rd);
++            self.e(0x72A0_0000 | (u >> 16) << 5 | rd); // movk, lsl #16
++        }
++    }
++    /// w<rd> = w<rn> + c (|c| < 4096)
++    fn add_wi(&mut self, rd: u32, rn: u32, c: i32) {
++        if c >= 0 {
++            self.e(0x1100_0000 | (c as u32) << 10 | rn << 5 | rd);
++        } else {
++            self.e(0x5100_0000 | (c.unsigned_abs()) << 10 | rn << 5 | rd);
++        }
++    }
++    /// cmp w<rn>, #c, through w<tmp> when c needs more than 12 bits.
++    fn cmp_wi(&mut self, rn: u32, c: i32, tmp: u32) {
++        if (0..4096).contains(&c) {
++            self.cmp_w(rn, c as u32);
++        } else if (-4095..0).contains(&c) {
++            self.e(0x3100_001F | c.unsigned_abs() << 10 | rn << 5); // cmn
++        } else {
++            self.mov_w(tmp, c);
++            self.e(0x6B00_001F | tmp << 16 | rn << 5);
++        }
++    }
 +    /// Every backward branch: the script time limit and the pause, through
 +    /// `h_timeout` once in `POLL_EVERY` times. A helper call on every one was
 +    /// ~2.5 % of Super Mario Bros. Crossover's startup (CrossBridge loops).
@@ -2647,8 +2727,10 @@ index 000000000..7164463c5
 +            self.branch(Fix::Cb(true, 0), Target::Exit);
 +        }
 +    }
++    /// The frame: x29, x30, x19, x20, x21, then the registers of `POOL`
++    /// (`pool_save`), saved by the room `emit` leaves after this.
 +    fn prologue(&mut self) {
-+        self.e(0xA9BD_7BFD); // stp x29, x30, [sp, #-48]!
++        self.e(0xA9BA_7BFD); // stp x29, x30, [sp, #-96]!
 +        self.e(0x9100_03FD); // mov x29, sp
 +        self.e(0xA901_53F3); // stp x19, x20, [sp, #16]
 +        self.str_x(X21, SP, 32);
@@ -2656,10 +2738,13 @@ index 000000000..7164463c5
 +        self.ldr_x(X19, X0, 0);
 +        self.ldr_x(X20, X0, 8);
 +    }
-+    fn epilogue(&mut self) {
++    fn epilogue(&mut self, pool: &[u32]) {
++        for &r in pool {
++            self.ldr_x(r, SP, pool_save(r));
++        }
 +        self.ldr_x(X21, SP, 32);
 +        self.e(0xA941_53F3); // ldp x19, x20, [sp, #16]
-+        self.e(0xA8C3_7BFD); // ldp x29, x30, [sp], #48
++        self.e(0xA8C6_7BFD); // ldp x29, x30, [sp], #96
 +        self.e(0xD65F_03C0); // ret
 +    }
 +    fn resolve(&mut self, labels: &[usize], exit: usize) -> bool {
@@ -2781,24 +2866,10 @@ index 000000000..7164463c5
 +
 +// ---------------------------------------------------------------- compiler
 +
-+fn compile(s: &mut State, method: Method<'_>) -> Result<usize, String> {
-+    init(s);
-+    if s.init != 1 {
-+        return Err("no code memory".into());
-+    }
-+    let info = method.get_verified_info();
-+    if !info.exceptions.is_empty() {
-+        return Err("try/catch".into());
-+    }
-+    let ops = &info.parsed_code;
-+    let body = method.body().ok_or("no body")?;
-+    let nl = body.num_locals as usize;
-+    let ms = body.max_stack as usize;
++/// The stack depth before every reachable op (`u32::MAX`: unreachable) and
++/// the branch targets, or why the method cannot be compiled.
++fn shape(ops: &[Op<'_>], ms: usize) -> Result<(Vec<u32>, Vec<bool>), String> {
 +    let n = ops.len();
-+    if n == 0 || n > 0xFFFF || nl + ms > 2000 {
-+        return Err("size".into());
-+    }
-+
 +    // Stack depth before every reachable op.
 +    let mut depth = vec![u32::MAX; n];
 +    depth[0] = 0;
@@ -2858,13 +2929,62 @@ index 000000000..7164463c5
 +            }
 +        }
 +    }
++    Ok((depth, target))
++}
++
++fn compile(s: &mut State, method: Method<'_>) -> Result<usize, String> {
++    init(s);
++    if s.init != 1 {
++        return Err("no code memory".into());
++    }
++    let info = method.get_verified_info();
++    if !info.exceptions.is_empty() {
++        return Err("try/catch".into());
++    }
++    let ops = &info.parsed_code;
++    let body = method.body().ok_or("no body")?;
++    let nl = body.num_locals as usize;
++    let ms = body.max_stack as usize;
++    let n = ops.len();
++    if n == 0 || n > 0xFFFF || nl + ms > 2000 {
++        return Err("size".into());
++    }
++
++    let (depth, target) = shape(ops, ms)?;
 +    let lay = s.layout.clone();
 +    let cache = TOS_CACHE.load(AtomicOrdering::Relaxed);
 +    let cb = CROSSBRIDGE.load(AtomicOrdering::Relaxed);
 +    let scopes = if cb { this_scopes(ops) } else { 0 };
-+    let (main, main_labels, main_exit) = emit(&lay, ops, &depth, &target, nl, cache, scopes, cb)?;
++    // Ints out of their `Value`s (`Typer`): every frame offset within reach
++    // of `ldr w` (16 KB).
++    let types = if cb && INTS.load(AtomicOrdering::Relaxed) && lay.words_ok && (nl + ms) * 16 + 32 < 16384 {
++        let mut entry = vec![Ty::Any; nl];
++        for (k, p) in method.resolved_param_config().iter().enumerate() {
++            if let (Some(class), Some(t)) = (p.param_type, entry.get_mut(k + 1)) {
++                *t = if class.is_builtin_int() {
++                    Ty::Int
++                } else if class.is_builtin_number() {
++                    Ty::Num
++                } else if class.is_builtin_boolean() {
++                    Ty::Bool
++                } else {
++                    Ty::Any
++                };
++            }
++        }
++        analyze(ops, &depth, &target, &entry)
++    } else {
++        None
++    };
++    let check = CHECK.load(AtomicOrdering::Relaxed);
++    let (main, main_labels, main_exit, typed) =
++        emit(&lay, ops, &depth, &target, nl, cache, scopes, cb, types.as_ref(), check)?;
++    s.typed_ops += typed;
++    s.all_ops += depth.iter().filter(|&&d| d != u32::MAX).count() as u64;
++    // The profiling build's A/B: the same code, its ints in `Value`s.
 +    let alt = if DUAL.load(AtomicOrdering::Relaxed) {
-+        Some(emit(&lay, ops, &depth, &target, nl, false, scopes, cb)?)
++        let (code, labels, exit, _) = emit(&lay, ops, &depth, &target, nl, cache, scopes, cb, None, false)?;
++        Some((code, labels, exit))
 +    } else {
 +        None
 +    };
@@ -2945,6 +3065,364 @@ index 000000000..7164463c5
 +    n
 +}
 +
++// ---------------------------------------------------------------- int types
++
++/// What `analyze` proves of a value before running: always a
++/// `Value::Integer`, a `Value::Number`, a `Value::Bool`, or anything.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum Ty {
++    Any,
++    Int,
++    Num,
++    Bool,
++}
++
++/// What `emit` knows of a method's ints to keep them out of their `Value`s
++/// (`V`), from `analyze`.
++struct Types {
++    /// The type of stack slot `k` before op `i`: `st[at[i] + k]`.
++    st: Vec<Ty>,
++    at: Vec<usize>,
++    /// The type of the local op `i` reads or writes, before it.
++    lt: Vec<Ty>,
++    /// `Add`, `Subtract`, `Multiply` or `URShift` whose result is only read
++    /// as `ToInt32` / `ToUint32` of it, in the same block: its 32 bits.
++    wrap: Vec<bool>,
++    /// The `Multiply` among them whose exact product can pass 2^53: their 32
++    /// bits are those of the double the interpreter rounds it to.
++    round: Vec<bool>,
++    /// A comparison of two ints read only by the next op, `IfTrue` /
++    /// `IfFalse`: one compare and one conditional branch.
++    fuse: Vec<bool>,
++}
++
++impl Types {
++    fn st(&self, i: usize, k: usize) -> Ty {
++        self.st[self.at[i] + k]
++    }
++}
++
++/// Bits of `|v|`: the least `b` with `|v| <= 2^b`.
++fn bits(v: i64) -> u32 {
++    let m = v.unsigned_abs();
++    if m <= 1 { 0 } else { 64 - (m - 1).leading_zeros() }
++}
++
++/// `ToInt32` or `ToUint32` is all op `op` takes of its operand `pos` (0: the
++/// top), so it reads an int's 32 bits the same as the exact value they wrap.
++fn int32_use(op: &Op<'_>, pos: u8) -> bool {
++    match op {
++        Op::CoerceI | Op::CoerceU | Op::CoerceISwapPop | Op::Sxi1 | Op::Sxi8 | Op::Sxi16 | Op::BitNot
++        | Op::IncrementI | Op::DecrementI | Op::NegateI | Op::Li8 | Op::Li16 | Op::Li32 | Op::Lf32
++        | Op::Lf64 | Op::Sf32 | Op::Sf64 | Op::SetSlotCoerceI { .. } => pos == 0,
++        Op::Si8 | Op::Si16 | Op::Si32 | Op::BitAnd | Op::BitOr | Op::BitXor | Op::LShift | Op::RShift
++        | Op::URShift | Op::AddI | Op::SubtractI | Op::MultiplyI => pos <= 1,
++        _ => false,
++    }
++}
++
++/// The types of `ops`' stack slots and locals (forward dataflow to a
++/// fixpoint, types meeting at branch targets), then the int operations that
++/// can work on 32 bits. `None`: nothing typed.
++///
++/// `Int` is a slot that holds a `Value::Integer` on every path: what an op
++/// that only pushes those pushed (`coerce_i`, `li16`, `sxi8`, bit operations,
++/// a constant), a local only ever set to one, a parameter declared `int`
++/// (`coerce_to_type`). `Add` of two ints is not one (it overflows to a
++/// Number), but `ToInt32` of it is their 32-bit sum: the exact sum of two
++/// ints is a double, and `ToInt32` takes it mod 2^32. This holds through any
++/// chain of `+ - *` whose exact values stay under 2^53, where every double
++/// the interpreter computes is exact (the bound of each value, `ib`, is kept
++/// in bits); past it only a product of two ints is taken, as the double it
++/// rounds to (`round`). This is how CrossBridge (FlasCC) code computes
++/// addresses and C ints: `add`, then `convert_i` or `li16`. Upstream's draft
++/// int interpreter (ruffle#23864) proves the same kinds of facts from its
++/// optimizer's types.
++fn analyze(ops: &[Op<'_>], depth: &[u32], target: &[bool], entry: &[Ty]) -> Option<Types> {
++    #[derive(Clone)]
++    struct S {
++        stack: Vec<Ty>,
++        locals: Vec<Ty>,
++    }
++    fn merge(into: &mut Option<S>, s: &S) -> bool {
++        let Some(t) = into else {
++            *into = Some(s.clone());
++            return true;
++        };
++        let mut changed = false;
++        for (x, y) in t.stack.iter_mut().zip(&s.stack).chain(t.locals.iter_mut().zip(&s.locals)) {
++            if *x != *y && *x != Ty::Any {
++                *x = Ty::Any;
++                changed = true;
++            }
++        }
++        changed
++    }
++    use Ty::*;
++    let n = ops.len();
++    let mut at = vec![0usize; n];
++    let mut total = 0;
++    for i in 0..n {
++        at[i] = total;
++        if depth[i] != u32::MAX {
++            total += depth[i] as usize;
++        }
++    }
++    let mut st = vec![Any; total];
++    let mut lt = vec![Any; n];
++    let mut entry_of: Vec<Option<S>> = vec![None; n];
++    // Passes over the code until no backward branch brings a new type.
++    loop {
++        let mut again = false;
++        let mut cur = Some(S { stack: Vec::new(), locals: entry.to_vec() });
++        for i in 0..n {
++            if depth[i] == u32::MAX {
++                cur = None;
++                continue;
++            }
++            if target[i] {
++                if let Some(c) = &cur {
++                    merge(&mut entry_of[i], c);
++                }
++                cur = entry_of[i].clone();
++            }
++            let Some(s) = cur.as_mut() else { continue };
++            let d = depth[i] as usize;
++            if s.stack.len() != d || s.locals.len() != entry.len() {
++                return None;
++            }
++            st[at[i]..at[i] + d].copy_from_slice(&s.stack);
++            let op = &ops[i];
++            let local = |s: &S, index: u32| s.locals.get(index as usize).copied().unwrap_or(Any);
++            if let Op::GetLocal { index } | Op::SetLocal { index } | Op::StoreLocal { index } = op {
++                lt[i] = local(s, *index);
++            }
++            let (pops, pushes) = effect(op)?;
++            if d < pops {
++                return None;
++            }
++            let top = if d >= 1 { s.stack[d - 1] } else { Any };
++            let second = if d >= 2 { s.stack[d - 2] } else { Any };
++            let set = |s: &mut S, index: u32, t: Ty| {
++                if let Some(l) = s.locals.get_mut(index as usize) {
++                    *l = t;
++                }
++            };
++            match op {
++                Op::SetLocal { index } | Op::StoreLocal { index } => set(s, *index, top),
++                Op::Kill { index } | Op::IncLocal { index } | Op::DecLocal { index } => set(s, *index, Any),
++                Op::IncLocalI { index } | Op::DecLocalI { index } => set(s, *index, Int),
++                Op::HasNext2 { object_register, index_register } => {
++                    set(s, *object_register, Any);
++                    set(s, *index_register, Any);
++                }
++                _ => {}
++            }
++            let result = match op {
++                Op::GetLocal { index } => local(s, *index),
++                Op::Dup | Op::StoreLocal { .. } => top,
++                Op::PushInt { .. } | Op::CoerceI | Op::CoerceISwapPop | Op::Li8 | Op::Li16 | Op::Li32
++                | Op::Sxi1 | Op::Sxi8 | Op::Sxi16 | Op::BitAnd | Op::BitOr | Op::BitXor | Op::BitNot
++                | Op::LShift | Op::RShift | Op::IncrementI | Op::DecrementI | Op::NegateI | Op::AddI
++                | Op::SubtractI | Op::MultiplyI => Int,
++                Op::PushUint { value } => {
++                    if *value <= i32::MAX as u32 { Int } else { Num }
++                }
++                Op::PushDouble { .. } | Op::CoerceD | Op::CoerceDSwapPop | Op::Lf32 | Op::Lf64 | Op::Negate
++                | Op::Modulo => Num,
++                Op::PushTrue | Op::PushFalse | Op::CoerceB | Op::Not | Op::Equals | Op::StrictEquals
++                | Op::LessThan | Op::LessEquals | Op::GreaterThan | Op::GreaterEquals => Bool,
++                // Int + Int can overflow to a Number; anything else with a
++                // Number is a Number (op_add), strings and objects anything.
++                Op::Add => match (second, top) {
++                    (Int | Num, Int | Num) if second == Num || top == Num => Num,
++                    _ => Any,
++                },
++                // Two values that cannot both be ints: a Number.
++                Op::Subtract | Op::Multiply if matches!(second, Num | Bool) || matches!(top, Num | Bool) => Num,
++                _ => Any,
++            };
++            match op {
++                Op::Swap => s.stack.swap(d - 1, d - 2),
++                Op::Dup => s.stack.push(top),
++                _ => {
++                    s.stack.truncate(d - pops);
++                    for _ in 0..pushes {
++                        s.stack.push(result);
++                    }
++                }
++            }
++            let mut to = |t: usize, s: &S| {
++                if t < n && merge(&mut entry_of[t], s) && t <= i {
++                    again = true;
++                }
++            };
++            match op {
++                Op::IfTrue { offset } | Op::IfFalse { offset } | Op::Jump { offset } | Op::PopJump { offset } => {
++                    to(*offset, s)
++                }
++                Op::LookupSwitch(ls) => {
++                    for c in ls.case_offsets.iter() {
++                        to(c.get(), s);
++                    }
++                    to(ls.default_offset.get(), s);
++                }
++                _ => {}
++            }
++            if matches!(
++                op,
++                Op::Jump { .. } | Op::PopJump { .. } | Op::LookupSwitch(_) | Op::ReturnValue { .. }
++                    | Op::ReturnVoid { .. } | Op::Throw
++            ) {
++                cur = None;
++            }
++        }
++        if !again {
++            break;
++        }
++    }
++    let ty = |i: usize, k: usize| st[at[i] + k];
++
++    // Who reads each value pushed, in the same block (op, operand from the
++    // top), with the bound of the ints (`ib`, bits; NOT: not an int) and
++    // whether that int is only right mod 2^32 (`arith`: a `wrap` candidate).
++    const NONE: u32 = u32::MAX;
++    const NOT: u8 = u8::MAX;
++    let mut cons = vec![NONE; n];
++    let mut cpos = vec![0u8; n];
++    let mut ib = vec![NOT; n];
++    let mut arith = vec![false; n];
++    let mut leaves = vec![false; n];
++    let mut proper2 = vec![false; n];
++    let mut sim: Vec<u32> = Vec::new();
++    let mut fresh = true;
++    for i in 0..n {
++        if depth[i] == u32::MAX {
++            fresh = true;
++            continue;
++        }
++        let d = depth[i] as usize;
++        if fresh || target[i] || sim.len() != d {
++            sim.clear();
++            sim.resize(d, NONE);
++        }
++        fresh = false;
++        let op = &ops[i];
++        let (pops, pushes) = effect(op)?;
++        let (b, ar) = {
++            // Operand k (0: the top): (bits, a true int rather than 32 bits).
++            let operand = |k: usize| -> Option<(u32, bool)> {
++                let p = sim[d - 1 - k];
++                if p != NONE && ib[p as usize] != NOT {
++                    return Some((ib[p as usize] as u32, !arith[p as usize]));
++                }
++                (ty(i, d - 1 - k) == Int).then_some((31, true))
++            };
++            let konst = |k: usize| -> Option<i32> {
++                let p = sim[d - 1 - k];
++                match ops.get(p as usize) {
++                    Some(Op::PushInt { value }) => Some(*value),
++                    Some(Op::PushUint { value }) if *value <= i32::MAX as u32 => Some(*value as i32),
++                    _ => None,
++                }
++            };
++            if d >= 2 {
++                proper2[i] = matches!((operand(0), operand(1)), (Some((_, true)), Some((_, true))));
++            }
++            match op {
++                Op::PushInt { value } => (bits(*value as i64), false),
++                Op::PushUint { value } if *value <= i32::MAX as u32 => (bits(*value as i64), false),
++                Op::GetLocal { .. } if lt[i] == Int => (31, false),
++                Op::Li8 => (8, false),
++                Op::Li16 => (16, false),
++                Op::Sxi1 => (0, false),
++                Op::Sxi8 => (7, false),
++                Op::Sxi16 => (15, false),
++                Op::BitAnd => match (konst(0), konst(1)) {
++                    (Some(m), _) | (_, Some(m)) if m >= 0 => (bits(m as i64), false),
++                    _ => (31, false),
++                },
++                Op::CoerceI | Op::CoerceISwapPop | Op::Li32 | Op::BitOr | Op::BitXor | Op::BitNot | Op::LShift
++                | Op::RShift | Op::IncrementI | Op::DecrementI | Op::NegateI | Op::AddI | Op::SubtractI
++                | Op::MultiplyI => (31, false),
++                Op::Add | Op::Subtract => match (operand(1), operand(0)) {
++                    (Some((x, _)), Some((y, _))) => (x.max(y) + 1, true),
++                    _ => (NOT as u32, false),
++                },
++                Op::Multiply => match (operand(1), operand(0)) {
++                    (Some((x, px)), Some((y, py))) => {
++                        leaves[i] = px && py;
++                        (x + y, true)
++                    }
++                    _ => (NOT as u32, false),
++                },
++                // By 1 to 31: below 2^31, an int. By anything else, a uint.
++                Op::URShift => match (konst(0), operand(1), operand(0)) {
++                    (Some(c), Some(_), _) if c & 31 != 0 => (32 - (c & 31) as u32, false),
++                    (_, Some(_), Some(_)) => (32, true),
++                    _ => (NOT as u32, false),
++                },
++                _ => (NOT as u32, false),
++            }
++        };
++        for k in 0..pops {
++            let p = sim.pop().unwrap_or(NONE);
++            if p != NONE {
++                cons[p as usize] = i as u32;
++                cpos[p as usize] = k as u8;
++            }
++        }
++        match op {
++            // Copies: read by more than one op, or left where they were.
++            Op::Dup | Op::Swap | Op::StoreLocal { .. } => sim.resize(sim.len() + pushes, NONE),
++            _ if pushes == 1 => {
++                sim.push(i as u32);
++                if b < 254 {
++                    ib[i] = b as u8;
++                    arith[i] = ar;
++                }
++            }
++            _ => sim.resize(sim.len() + pushes, NONE),
++        }
++        if matches!(
++            op,
++            Op::IfTrue { .. } | Op::IfFalse { .. } | Op::Jump { .. } | Op::PopJump { .. } | Op::LookupSwitch(_)
++                | Op::ReturnValue { .. } | Op::ReturnVoid { .. } | Op::Throw
++        ) {
++            fresh = true;
++        }
++    }
++
++    // From the last op back, as readers come after what they read: 32 bits
++    // where the only reader takes `ToInt32` of them, or is itself on 32 bits.
++    let mut wrap = vec![false; n];
++    let mut round = vec![false; n];
++    for i in (0..n).rev() {
++        if !arith[i] || cons[i] == NONE {
++            continue;
++        }
++        let (b, j) = (ib[i] as u32, cons[i] as usize);
++        let direct = int32_use(&ops[j], cpos[i]);
++        if b <= 53 && (direct || (arith[j] && wrap[j] && !round[j])) {
++            wrap[i] = true;
++        } else if matches!(ops[i], Op::Multiply) && leaves[i] && direct {
++            wrap[i] = true;
++            round[i] = true;
++        }
++    }
++    let mut fuse = vec![false; n];
++    for i in 0..n.saturating_sub(1) {
++        fuse[i] = matches!(
++            ops[i],
++            Op::Equals | Op::StrictEquals | Op::LessThan | Op::LessEquals | Op::GreaterThan | Op::GreaterEquals
++        ) && cons[i] == (i + 1) as u32
++            && matches!(ops[i + 1], Op::IfTrue { .. } | Op::IfFalse { .. })
++            && !target[i + 1]
++            && proper2[i];
++    }
++    Some(Types { st, at, lt, wrap, round, fuse })
++}
++
 +fn push_map(s: &mut State, addr: usize, ops: &[Op<'_>], depth: &[u32], labels: &[usize], exit: usize) {
 +    s.map.push((addr, "(prologue)".into()));
 +    for (i, op) in ops.iter().enumerate() {
@@ -2994,6 +3472,647 @@ index 000000000..7164463c5
 +    }
 +}
 +
++/// FlashNX: where an operand stack entry is while `emit` keeps the ints of
++/// `Types` out of their `Value`s (`Typer`). Within a block only: branches,
++/// branch targets, untyped ops and helper calls find every entry written back
++/// to its frame slot, as the interpreter would hold it.
++#[derive(Clone, Copy, PartialEq)]
++enum V {
++    /// In its frame slot.
++    Mem,
++    /// In its frame slot, a `Value::Integer` (a `W` or `Imm` written back).
++    MemInt,
++    /// The local at this frame offset, not read yet (`GetLocal`), and
++    /// whether it is an int.
++    Local(usize, bool),
++    /// x14 / x15 (`Tos::Regs`, from the untyped `GetSlot`).
++    Regs,
++    /// This int.
++    Imm(i32),
++    /// The int in w<r>, one of `POOL`, its upper 32 bits clear. A `wrap`
++    /// result holds only the 32 bits `ToInt32` takes of it; written back, it
++    /// is that `Value::Integer`, which its only reader (`ToInt32` again, or
++    /// an op on 32 bits) reads the same.
++    W(u32),
++}
++
++/// The registers of `V::W`: callee-saved, so helper calls keep them; the
++/// prologue of a method saves those it uses.
++const POOL: std::ops::RangeInclusive<u32> = 22..=28;
++/// `nop`, the room left in the prologue for the saves of `POOL`.
++const NOP: u32 = 0xD503_201F;
++
++/// An int operand: in a register, or a constant.
++#[derive(Clone, Copy)]
++enum Src {
++    Reg(u32),
++    Imm(i32),
++}
++
++/// Typed code out of the way, after the method's code (`emit_cold`): none
++/// of it comes back but a successful `Refresh`. The entries to write back
++/// first are those of the moment the check was made (`save`).
++enum Cold {
++    /// The domain memory view is stale: `h_dm`, then back to `back`, or op
++    /// `i` in the interpreter.
++    Refresh { from: usize, back: usize, save: Vec<(usize, V)>, d: usize, i: usize },
++    /// An address out of range: the op's helper (which raises the
++    /// interpreter's error), then the interpreter from the next op.
++    Slow { from: Vec<usize>, save: Vec<(usize, V)>, helper: usize, d: usize, i: usize, post: usize },
++    /// `check`: no int where `analyze` proved one: counted, then op `i` in
++    /// the interpreter.
++    TypeFail { from: usize, save: Vec<(usize, V)>, d: usize, i: usize },
++}
++
++/// Write the entry `v` to the frame at `at` as the interpreter would hold it.
++fn store_v(a: &mut Asm, lay: &Layout, at: usize, v: V) {
++    match v {
++        V::Mem | V::MemInt => {}
++        V::Local(off, _) => {
++            a.ldr_q(0, X19, off);
++            a.str_q(0, X19, at);
++        }
++        V::Regs => {
++            a.str_x(14, X19, at);
++            a.str_x(15, X19, at + 8);
++        }
++        V::Imm(x) => a.store_const(at, bytes_of(Value::Integer(x))),
++        V::W(r) => {
++            let t = a.mov_x(9, lay.int_word);
++            a.str_x(t, X19, at);
++            a.str_w(r, X19, at + lay.int_off);
++        }
++    }
++}
++
++/// The interpreter's result of `op` on two int constants, as its readers
++/// take it (`ToInt32` for a `wrap` one).
++fn fold2(op: &Op<'_>, p: i32, q: i32) -> i32 {
++    match op {
++        Op::Add | Op::AddI => p.wrapping_add(q),
++        Op::Subtract | Op::SubtractI => p.wrapping_sub(q),
++        // The double product, rounded as the interpreter rounds it.
++        Op::Multiply => crate::ecma_conversions::f64_to_wrapping_i32(p as f64 * q as f64),
++        Op::MultiplyI => p.wrapping_mul(q),
++        Op::BitAnd => p & q,
++        Op::BitOr => p | q,
++        Op::BitXor => p ^ q,
++        Op::LShift => p.wrapping_shl(q as u32 & 31),
++        Op::RShift => p >> (q & 31),
++        _ => ((p as u32) >> (q as u32 & 31)) as i32, // URShift
++    }
++}
++
++/// w<rd> = `op` of two ints (`Typer::bin`).
++fn emit_bin(a: &mut Asm, op: &Op<'_>, rd: u32, x: Src, y: Src, round: bool) {
++    use Src::*;
++    match (op, x, y) {
++        (Op::LShift, Reg(n), Imm(c)) => {
++            let s = (c & 31) as u32;
++            return a.e(0x5300_0000 | ((32 - s) & 31) << 16 | (31 - s) << 10 | n << 5 | rd); // lsl
++        }
++        (Op::RShift, Reg(n), Imm(c)) => return a.e(0x1300_7C00 | ((c & 31) as u32) << 16 | n << 5 | rd), // asr
++        (Op::URShift, Reg(n), Imm(c)) => return a.e(0x5300_7C00 | ((c & 31) as u32) << 16 | n << 5 | rd), // lsr
++        (Op::Add | Op::AddI, Reg(n), Imm(c)) | (Op::Add | Op::AddI, Imm(c), Reg(n)) if c.unsigned_abs() < 4096 => {
++            return a.add_wi(rd, n, c);
++        }
++        (Op::Subtract | Op::SubtractI, Reg(n), Imm(c)) if c.unsigned_abs() < 4096 => return a.add_wi(rd, n, -c),
++        // On 32 bits, times 2^k is a shift.
++        (Op::Multiply | Op::MultiplyI, Reg(n), Imm(c)) | (Op::Multiply | Op::MultiplyI, Imm(c), Reg(n))
++            if !round && c > 0 && c.count_ones() == 1 =>
++        {
++            let s = c.trailing_zeros();
++            return a.e(0x5300_0000 | ((32 - s) & 31) << 16 | (31 - s) << 10 | n << 5 | rd);
++        }
++        _ => {}
++    }
++    let n = match x {
++        Reg(r) => r,
++        Imm(v) => {
++            a.mov_w(10, v);
++            10
++        }
++    };
++    let m = match y {
++        Reg(r) => r,
++        Imm(v) => {
++            a.mov_w(11, v);
++            11
++        }
++    };
++    let rr = m << 16 | n << 5 | rd;
++    match op {
++        Op::Add | Op::AddI => a.e(0x0B00_0000 | rr),
++        Op::Subtract | Op::SubtractI => a.e(0x4B00_0000 | rr),
++        Op::Multiply if round => {
++            // The exact product, rounded to a double as `n1 * n2` is, back
++            // to an integer (exact: it is one, under 2^62), its 32 bits.
++            a.e(0x9B20_7C00 | rr); // smull x<rd>, w<n>, w<m>
++            a.e(0x9E62_0000 | rd << 5); // scvtf d0, x<rd>
++            a.e(0x9E78_0000 | rd); // fcvtzs x<rd>, d0
++            a.e(0x2A00_03E0 | rd << 16 | rd); // mov w<rd>, w<rd>
++        }
++        Op::Multiply | Op::MultiplyI => a.e(0x1B00_7C00 | rr), // mul
++        Op::BitAnd => a.e(0x0A00_0000 | rr),
++        Op::BitOr => a.e(0x2A00_0000 | rr),
++        Op::BitXor => a.e(0x4A00_0000 | rr),
++        Op::LShift => a.e(0x1AC0_2000 | rr), // the count mod 32, as `& 0x1F`
++        Op::RShift => a.e(0x1AC0_2800 | rr),
++        _ => a.e(0x1AC0_2400 | rr), // URShift
++    }
++}
++
++/// The typed side of `emit`: an operand stack of `V`s for the ops whose
++/// operands `Types` proves to be ints, run on registers with no tag check,
++/// the others left to the untyped code with everything in the frame.
++struct Typer<'t> {
++    lay: &'t Layout,
++    ty: &'t Types,
++    nl: usize,
++    /// Check every int `analyze` proved where it is read from the frame
++    /// (`Cold::TypeFail`).
++    check: bool,
++    vs: Vec<V>,
++    cold: Vec<Cold>,
++    /// Bit r - 22 for each register of `POOL` used.
++    used: u32,
++    /// The domain memory view (`Ctx::dm_*`) was checked since the last
++    /// untyped op or branch target.
++    dm_ok: bool,
++    /// The next op (`IfTrue` / `IfFalse`) was emitted with this one.
++    skip: bool,
++    /// Ops emitted typed.
++    count: u64,
++}
++
++impl Typer<'_> {
++    fn slot(&self, k: usize) -> usize {
++        (self.nl + k) * 16
++    }
++
++    /// Write entry k back: it is in its frame slot from now on.
++    fn flush(&mut self, a: &mut Asm, k: usize) {
++        let v = self.vs[k];
++        store_v(a, self.lay, self.slot(k), v);
++        self.vs[k] = match v {
++            V::Imm(_) | V::W(_) | V::MemInt | V::Local(_, true) => V::MemInt,
++            _ => V::Mem,
++        };
++    }
++
++    /// The entries to write back on the way out (`Cold`).
++    fn snapshot(&self) -> Vec<(usize, V)> {
++        let mut s = Vec::new();
++        for (k, &v) in self.vs.iter().enumerate() {
++            if !matches!(v, V::Mem | V::MemInt) {
++                s.push((self.slot(k), v));
++            }
++        }
++        s
++    }
++
++    /// Entry k holds an int as op i finds it.
++    fn int(&self, i: usize, k: usize) -> bool {
++        match self.vs[k] {
++            V::Imm(_) | V::W(_) | V::MemInt => true,
++            V::Mem => self.ty.st(i, k) == Ty::Int,
++            V::Local(_, int) => int,
++            V::Regs => false,
++        }
++    }
++
++    /// `check`: the tag at `off` is `tag`, or `Cold::TypeFail`.
++    fn check_tag(&mut self, a: &mut Asm, i: usize, off: usize, tag: u8) {
++        if self.check && off < 4096 {
++            a.ldrb(9, X19, off);
++            a.cmp_w(9, tag as u32);
++            let from = a.fwd(Fix::BCond(NE));
++            let save = self.snapshot();
++            self.cold.push(Cold::TypeFail { from, save, d: self.vs.len(), i });
++        }
++    }
++
++    /// Entry k (an int, `int`) as a register or a constant; one in memory is
++    /// read into w<tmp>.
++    fn src(&mut self, a: &mut Asm, i: usize, k: usize, tmp: u32) -> Src {
++        let off = match self.vs[k] {
++            V::Imm(x) => return Src::Imm(x),
++            V::W(r) => return Src::Reg(r),
++            V::MemInt => {
++                a.ldr_w(tmp, X19, self.slot(k) + self.lay.int_off);
++                return Src::Reg(tmp);
++            }
++            V::Mem => self.slot(k),
++            V::Local(off, _) => off,
++            V::Regs => unreachable!(),
++        };
++        self.check_tag(a, i, off, self.lay.int_tag);
++        a.ldr_w(tmp, X19, off + self.lay.int_off);
++        Src::Reg(tmp)
++    }
++
++    /// `src` in a register.
++    fn reg(&mut self, a: &mut Asm, i: usize, k: usize, tmp: u32) -> u32 {
++        match self.src(a, i, k, tmp) {
++            Src::Reg(r) => r,
++            Src::Imm(v) => {
++                a.mov_w(tmp, v);
++                tmp
++            }
++        }
++    }
++
++    /// A register of `POOL` for a new `V::W`, writing the deepest one back
++    /// when all are taken.
++    fn alloc(&mut self, a: &mut Asm) -> u32 {
++        for r in POOL {
++            if !self.vs.contains(&V::W(r)) {
++                self.used |= 1 << (r - 22);
++                return r;
++            }
++        }
++        let k = self.vs.iter().position(|v| matches!(v, V::W(_))).unwrap();
++        let V::W(r) = self.vs[k] else { unreachable!() };
++        self.flush(a, k);
++        r
++    }
++
++    /// The domain memory view is valid from here on in this block: checked
++    /// once, refreshed out of the way (`Cold::Refresh`).
++    fn view(&mut self, a: &mut Asm, i: usize) {
++        if self.dm_ok {
++            return;
++        }
++        // `h_dm` does not keep x14 / x15 (the untyped `GetSlot`'s result).
++        if let Some(k) = self.vs.iter().position(|&v| v == V::Regs) {
++            self.flush(a, k);
++        }
++        a.ldr_x(9, X21, CTX_GEN);
++        a.ldr_x(9, 9, 0);
++        a.ldr_x(10, X21, CTX_DM_GEN);
++        a.cmp_xx(9, 10);
++        let from = a.fwd(Fix::BCond(NE));
++        let back = a.here();
++        let save = self.snapshot();
++        self.cold.push(Cold::Refresh { from, back, save, d: self.vs.len(), i });
++        self.dm_ok = true;
++    }
++
++    /// `w<addr> + width <= dm_len`, or `Cold::Slow` (`negative`: a store's
++    /// address, which must not be one).
++    fn bounds(&mut self, a: &mut Asm, op: &Op<'_>, i: usize, addr: u32, width: u32, negative: bool, post: usize) {
++        let mut from = Vec::new();
++        if negative {
++            a.cmp_w(addr, 0);
++            from.push(a.fwd(Fix::BCond(LT)));
++        }
++        a.ldr_x(13, X21, CTX_DM_LEN);
++        a.add_xi(16, addr, width);
++        a.cmp_xx(16, 13);
++        from.push(a.fwd(Fix::BCond(HI)));
++        let k = kind(op);
++        let helper = if k < KINDS { k } else { H_GENERIC };
++        let save = self.snapshot();
++        let d = self.vs.len();
++        self.cold.push(Cold::Slow { from, save, helper, d, i, post });
++        a.ldr_x(17, X21, CTX_DM_PTR);
++    }
++
++    /// Op i typed, when its operands allow it; false leaves it to the
++    /// untyped code. `next`: op i + 1.
++    fn op(&mut self, a: &mut Asm, i: usize, op: &Op<'_>, next: Option<&Op<'_>>) -> bool {
++        let d = self.vs.len();
++        let ty = self.ty;
++        let two = d >= 2 && self.int(i, d - 2) && self.int(i, d - 1);
++        let one = d >= 1 && self.int(i, d - 1);
++        match op {
++            Op::GetLocal { index } => {
++                let off = *index as usize * 16;
++                self.vs.push(V::Local(off, ty.lt[i] == Ty::Int));
++            }
++            Op::PushInt { value } => self.vs.push(V::Imm(*value)),
++            Op::PushUint { value } if *value <= i32::MAX as u32 => self.vs.push(V::Imm(*value as i32)),
++            Op::Nop | Op::CoerceA => {}
++            Op::Pop => {
++                self.vs.pop();
++            }
++            Op::SetLocal { index } | Op::StoreLocal { index } => {
++                let dst = *index as usize * 16;
++                // A `GetLocal` of it not read yet reads the old value.
++                for k in 0..d - 1 {
++                    if matches!(self.vs[k], V::Local(off, _) if off == dst) {
++                        self.flush(a, k);
++                    }
++                }
++                match self.vs[d - 1] {
++                    V::Local(src, _) if src == dst => {}
++                    V::Local(src, _) => {
++                        a.ldr_q(0, X19, src);
++                        a.str_q(0, X19, dst);
++                    }
++                    V::Mem | V::MemInt => {
++                        a.ldr_q(0, X19, self.slot(d - 1));
++                        a.str_q(0, X19, dst);
++                    }
++                    v => store_v(a, self.lay, dst, v),
++                }
++                if matches!(op, Op::SetLocal { .. }) {
++                    self.vs.pop();
++                }
++            }
++            Op::Dup => {
++                // Only one entry can be x14 / x15, which the untyped code
++                // may reuse: a copy of it is a copy in the frame.
++                if self.vs[d - 1] == V::Regs {
++                    self.flush(a, d - 1);
++                }
++                let top = self.vs[d - 1];
++                match top {
++                    V::W(r) => {
++                        let r2 = self.alloc(a);
++                        a.e(0x2A00_03E0 | r << 16 | r2); // mov w<r2>, w<r>
++                        self.vs.push(V::W(r2));
++                    }
++                    V::Mem | V::MemInt => {
++                        a.ldr_q(0, X19, self.slot(d - 1));
++                        a.str_q(0, X19, self.slot(d));
++                        self.vs.push(top);
++                    }
++                    _ => self.vs.push(top),
++                }
++            }
++            Op::Swap => {
++                let (x, y) = (self.vs[d - 2], self.vs[d - 1]);
++                if matches!(x, V::Mem | V::MemInt) || matches!(y, V::Mem | V::MemInt) {
++                    self.flush(a, d - 2);
++                    self.flush(a, d - 1);
++                    a.ldr_q(0, X19, self.slot(d - 2));
++                    a.ldr_q(1, X19, self.slot(d - 1));
++                    a.str_q(1, X19, self.slot(d - 2));
++                    a.str_q(0, X19, self.slot(d - 1));
++                }
++                self.vs.swap(d - 2, d - 1);
++            }
++            Op::CoerceI if one => {} // already one
++            Op::Add | Op::Subtract | Op::Multiply | Op::URShift if two && ty.wrap[i] => self.bin(a, i, op, ty.round[i]),
++            Op::URShift if two && matches!(self.vs[d - 1], V::Imm(c) if c & 31 != 0) => self.bin(a, i, op, false),
++            Op::AddI | Op::SubtractI | Op::MultiplyI | Op::BitAnd | Op::BitOr | Op::BitXor | Op::LShift | Op::RShift
++                if two =>
++            {
++                self.bin(a, i, op, false)
++            }
++            Op::BitNot | Op::Sxi1 | Op::Sxi8 | Op::Sxi16 | Op::IncrementI | Op::DecrementI | Op::NegateI if one => {
++                self.un(a, i, op)
++            }
++            Op::Li8 | Op::Li16 | Op::Li32 | Op::Lf32 | Op::Lf64 if one => self.load(a, i, op),
++            Op::Si8 | Op::Si16 | Op::Si32 if two => self.store(a, i, op),
++            Op::Sf32 | Op::Sf64
++                if d >= 2 && one && (self.int(i, d - 2) || (self.vs[d - 2] == V::Mem && ty.st(i, d - 2) == Ty::Num)) =>
++            {
++                self.store(a, i, op)
++            }
++            Op::Equals | Op::StrictEquals | Op::LessThan | Op::LessEquals | Op::GreaterThan | Op::GreaterEquals
++                if two && ty.fuse[i] =>
++            {
++                match next {
++                    Some(&Op::IfTrue { offset }) => self.fused(a, i, op, offset, true),
++                    Some(&Op::IfFalse { offset }) => self.fused(a, i, op, offset, false),
++                    _ => return false,
++                }
++            }
++            _ => return false,
++        }
++        self.count += 1;
++        true
++    }
++
++    /// Two ints to one: `fold2` for two constants.
++    fn bin(&mut self, a: &mut Asm, i: usize, op: &Op<'_>, round: bool) {
++        let d = self.vs.len();
++        if let (V::Imm(p), V::Imm(q)) = (self.vs[d - 2], self.vs[d - 1]) {
++            self.vs.pop();
++            self.vs[d - 2] = V::Imm(fold2(op, p, q));
++            return;
++        }
++        let y = self.src(a, i, d - 1, 11);
++        let x = self.src(a, i, d - 2, 10);
++        // The operands are read: their registers are free for the result.
++        self.vs.pop();
++        self.vs[d - 2] = V::Mem;
++        let rd = self.alloc(a);
++        emit_bin(a, op, rd, x, y, round);
++        self.vs[d - 2] = V::W(rd);
++    }
++
++    fn un(&mut self, a: &mut Asm, i: usize, op: &Op<'_>) {
++        let d = self.vs.len();
++        if let V::Imm(v) = self.vs[d - 1] {
++            self.vs[d - 1] = V::Imm(match op {
++                Op::BitNot => !v,
++                Op::Sxi1 => -(v & 1),
++                Op::Sxi8 => v as i8 as i32,
++                Op::Sxi16 => v as i16 as i32,
++                Op::IncrementI => v.wrapping_add(1),
++                Op::DecrementI => v.wrapping_sub(1),
++                _ => v.wrapping_neg(),
++            });
++            return;
++        }
++        let n = self.reg(a, i, d - 1, 10);
++        self.vs[d - 1] = V::Mem;
++        let rd = self.alloc(a);
++        a.e(match op {
++            Op::BitNot => 0x2A20_03E0 | n << 16 | rd, // mvn
++            Op::Sxi1 => 0x1300_0000 | n << 5 | rd,    // sbfx #0, #1
++            Op::Sxi8 => 0x1300_1C00 | n << 5 | rd,    // sxtb
++            Op::Sxi16 => 0x1300_3C00 | n << 5 | rd,   // sxth
++            Op::IncrementI => 0x1100_0400 | n << 5 | rd,
++            Op::DecrementI => 0x5100_0400 | n << 5 | rd,
++            _ => 0x4B00_03E0 | n << 16 | rd, // NegateI: neg
++        });
++        self.vs[d - 1] = V::W(rd);
++    }
++
++    /// `li8` .. `lf64` at an int address: in the view, in range, or the
++    /// helper. An int result in a register, a Number in the frame.
++    fn load(&mut self, a: &mut Asm, i: usize, op: &Op<'_>) {
++        let d = self.vs.len();
++        let width = match op {
++            Op::Li8 => 1,
++            Op::Li16 => 2,
++            Op::Lf64 => 8,
++            _ => 4,
++        };
++        self.view(a, i);
++        let addr = self.reg(a, i, d - 1, 12);
++        self.bounds(a, op, i, addr, width, false, d);
++        self.vs[d - 1] = V::Mem;
++        match op {
++            Op::Lf32 | Op::Lf64 => {
++                if matches!(op, Op::Lf32) {
++                    a.mem_reg(MEM_LDR_S, 0, 17, addr);
++                    a.e(0x1E22_C000); // fcvt d0, s0
++                } else {
++                    a.mem_reg(MEM_LDR_D, 0, 17, addr);
++                }
++                let at = self.slot(d - 1);
++                let r = a.mov_x(9, self.lay.num_word);
++                a.str_x(r, X19, at);
++                a.str_d(0, X19, at + self.lay.num_off);
++            }
++            _ => {
++                let rd = self.alloc(a);
++                let m = match op {
++                    Op::Li8 => MEM_LDRB,
++                    Op::Li16 => MEM_LDRH,
++                    _ => MEM_LDR_W,
++                };
++                a.mem_reg(m, rd, 17, addr);
++                self.vs[d - 1] = V::W(rd);
++            }
++        }
++    }
++
++    /// `si8` .. `sf64`: the value (an int, or a Number in the frame for
++    /// `sf32` / `sf64`) at an int address.
++    fn store(&mut self, a: &mut Asm, i: usize, op: &Op<'_>) {
++        let d = self.vs.len();
++        let width = match op {
++            Op::Si8 => 1,
++            Op::Si16 => 2,
++            Op::Sf64 => 8,
++            _ => 4,
++        };
++        self.view(a, i);
++        let addr = self.reg(a, i, d - 1, 12);
++        let float = matches!(op, Op::Sf32 | Op::Sf64);
++        let mut val = 11;
++        if float && !self.int(i, d - 2) {
++            let at = self.slot(d - 2);
++            self.check_tag(a, i, at, self.lay.num_tag);
++            a.ldr_d(0, X19, at + self.lay.num_off);
++        } else {
++            val = self.reg(a, i, d - 2, 11);
++            if float {
++                a.e(0x1E62_0000 | val << 5); // scvtf d0, w<val>
++            }
++        }
++        self.bounds(a, op, i, addr, width, true, d - 2);
++        match op {
++            Op::Si8 => a.mem_reg(MEM_STRB, val, 17, addr),
++            Op::Si16 => a.mem_reg(MEM_STRH, val, 17, addr),
++            Op::Si32 => a.mem_reg(MEM_STR_W, val, 17, addr),
++            Op::Sf32 => {
++                a.e(0x1E62_4000); // fcvt s0, d0
++                a.mem_reg(MEM_STR_S, 0, 17, addr);
++            }
++            _ => a.mem_reg(MEM_STR_D, 0, 17, addr),
++        }
++        self.vs.truncate(d - 2);
++    }
++
++    /// A comparison of two ints and the `IfTrue` / `IfFalse` after it: one
++    /// `cmp`, one `b.cond`, the Bool never made.
++    fn fused(&mut self, a: &mut Asm, i: usize, op: &Op<'_>, offset: usize, nz: bool) {
++        let d = self.vs.len();
++        // The branch target and the next op find the rest in the frame.
++        for k in 0..d - 2 {
++            self.flush(a, k);
++        }
++        if offset <= i + 1 {
++            a.poll_timeout();
++            self.dm_ok = false;
++        }
++        let mut cond = match op {
++            Op::LessThan => LT,
++            Op::LessEquals => LE,
++            Op::GreaterThan => GT,
++            Op::GreaterEquals => GE,
++            _ => EQ,
++        };
++        if let (V::Imm(p), V::Imm(q)) = (self.vs[d - 2], self.vs[d - 1]) {
++            let t = match cond {
++                LT => p < q,
++                LE => p <= q,
++                GT => p > q,
++                GE => p >= q,
++                _ => p == q,
++            };
++            self.vs.truncate(d - 2);
++            if t == nz {
++                a.branch(Fix::B, Target::Op(offset));
++            }
++            self.skip = true;
++            return;
++        }
++        let y = self.src(a, i, d - 1, 11);
++        let x = self.src(a, i, d - 2, 10);
++        self.vs.truncate(d - 2);
++        match (x, y) {
++            (Src::Reg(n), Src::Reg(m)) => a.e(0x6B00_001F | m << 16 | n << 5), // cmp
++            (Src::Reg(n), Src::Imm(c)) => a.cmp_wi(n, c, 11),
++            (Src::Imm(c), Src::Reg(m)) => {
++                a.cmp_wi(m, c, 10);
++                // c < m is m > c.
++                cond = match cond {
++                    LT => GT,
++                    LE => GE,
++                    GT => LT,
++                    GE => LE,
++                    c => c,
++                };
++            }
++            (Src::Imm(_), Src::Imm(_)) => unreachable!(),
++        }
++        a.branch(Fix::BCond(if nz { cond } else { cond ^ 1 }), Target::Op(offset));
++        self.skip = true;
++    }
++}
++
++/// One `Cold` stub.
++fn emit_cold(a: &mut Asm, lay: &Layout, c: Cold) {
++    let gen_check = |a: &mut Asm| {
++        a.ldr_x(9, X21, CTX_GEN);
++        a.ldr_x(9, 9, 0);
++        a.ldr_x(10, X21, CTX_DM_GEN);
++        a.cmp_xx(9, 10);
++    };
++    match c {
++        Cold::Refresh { from, back, save, d, i } => {
++            let here = a.here();
++            a.set(from, here);
++            // h_dm keeps x19-x28: the entries in `POOL` are still there.
++            a.call(H_DM, 0, 0, 0, false);
++            gen_check(a);
++            a.branch(Fix::BCond(EQ), Target::Code(back));
++            for (at, v) in save {
++                store_v(a, lay, at, v);
++            }
++            a.call(H_DEOPT, d, i, 0, true);
++        }
++        Cold::Slow { from, save, helper, d, i, post } => {
++            let here = a.here();
++            for f in from {
++                a.set(f, here);
++            }
++            for (at, v) in save {
++                store_v(a, lay, at, v);
++            }
++            a.call(helper, d, i, post, true);
++            a.call(H_DEOPT, post, i + 1, 0, true);
++        }
++        Cold::TypeFail { from, save, d, i } => {
++            let here = a.here();
++            a.set(from, here);
++            for (at, v) in save {
++                store_v(a, lay, at, v);
++            }
++            a.call(H_TYPEFAIL, d, i, 0, false);
++            a.call(H_DEOPT, d, i, 0, true);
++        }
++    }
++}
++
 +/// The code of one method: words, the start of each op, the exit.
 +fn emit(
 +    lay: &Layout,
@@ -3004,7 +4123,9 @@ index 000000000..7164463c5
 +    cache: bool,
 +    this_scopes: usize,
 +    cb: bool,
-+) -> Result<(Vec<u32>, Vec<usize>, usize), String> {
++    types: Option<&Types>,
++    check: bool,
++) -> Result<(Vec<u32>, Vec<usize>, usize, u64), String> {
 +    let n = ops.len();
 +    let slot = |d: usize| (nl + d) * 16;
 +    let local0 = Op::GetLocal { index: 0 };
@@ -3013,25 +4134,96 @@ index 000000000..7164463c5
 +        fixups: Vec::new(),
 +    };
 +    a.prologue();
++    // Room for the saves of `POOL`, filled or taken out at the end.
++    let pool_at = a.here();
++    for _ in POOL {
++        a.e(NOP);
++    }
 +    let mut labels = vec![usize::MAX; n];
 +    let mut tos = Tos::Mem;
++    let mut typer = types.map(|ty| Typer {
++        lay,
++        ty,
++        nl,
++        check,
++        vs: Vec::new(),
++        cold: Vec::new(),
++        used: 0,
++        dm_ok: false,
++        skip: false,
++        count: 0,
++    });
 +    for i in 0..n {
-+        if depth[i] == u32::MAX {
-+            labels[i] = a.code.len();
-+            tos = Tos::Mem;
-+            continue;
-+        }
-+        let d = depth[i] as usize;
-+        // Jumps arrive with nothing cached: write it back on the way in.
-+        if target[i] && tos != Tos::Mem {
-+            flush(&mut a, tos, slot(d - 1));
-+            tos = Tos::Mem;
-+        }
-+        labels[i] = a.code.len();
 +        let op = match &ops[i] {
 +            Op::GetScopeObject { index } if (*index as usize) < this_scopes => &local0,
 +            op => op,
 +        };
++        if depth[i] == u32::MAX {
++            labels[i] = a.code.len();
++            tos = Tos::Mem;
++            if let Some(t) = &mut typer {
++                t.vs.clear();
++                t.dm_ok = false;
++            }
++            continue;
++        }
++        let d = depth[i] as usize;
++        if let Some(t) = &mut typer {
++            if t.skip {
++                // Emitted with the comparison before it (`Typer::fused`).
++                t.skip = false;
++                labels[i] = a.code.len();
++                continue;
++            }
++            // Jumps arrive with everything in the frame, of the types the
++            // other paths give it too.
++            if target[i] {
++                for k in 0..t.vs.len() {
++                    t.flush(&mut a, k);
++                }
++                t.vs.iter_mut().for_each(|v| *v = V::Mem);
++                t.dm_ok = false;
++            }
++            if t.vs.len() != d {
++                t.vs.clear();
++                t.vs.resize(d, V::Mem);
++            }
++            labels[i] = a.code.len();
++            if t.op(&mut a, i, op, ops.get(i + 1)) {
++                continue;
++            }
++            // The untyped code finds everything in the frame but its top,
++            // which can be its stack cache.
++            for k in 0..d.saturating_sub(1) {
++                t.flush(&mut a, k);
++            }
++            tos = match t.vs.last() {
++                Some(V::Local(off, _)) => Tos::Local(*off),
++                Some(V::Regs) => Tos::Regs,
++                Some(V::Mem | V::MemInt) | None => Tos::Mem,
++                Some(_) => {
++                    t.flush(&mut a, d - 1);
++                    Tos::Mem
++                }
++            };
++            // The untyped code owns its stack cache now: past this op the old
++            // top is either taken or in its frame slot. A `Local` left here
++            // would read the local again after the op, which may write it
++            // (SMBC's `getlocal 4, kill 4, setproperty` stored undefined).
++            if let Some(top) = t.vs.last_mut()
++                && matches!(top, V::Local(..) | V::Regs)
++            {
++                *top = V::Mem;
++            }
++            t.dm_ok = false;
++        } else {
++            // Jumps arrive with nothing cached: write it back on the way in.
++            if target[i] && tos != Tos::Mem {
++                flush(&mut a, tos, slot(d - 1));
++                tos = Tos::Mem;
++            }
++            labels[i] = a.code.len();
++        }
 +        let consumer = cache
 +            && match op {
 +                Op::GetLocal { .. } | Op::SetLocal { .. } | Op::StoreLocal { .. } | Op::Pop => true,
@@ -3626,16 +4818,73 @@ index 000000000..7164463c5
 +                a.call(h, d, i, d - pops + pushes, true);
 +            }
 +        }
++        if let Some(t) = &mut typer {
++            // What the untyped op left: the entries below its operands as
++            // they were, its results in the frame or in its stack cache.
++            let (pops, pushes) = effect(op).unwrap();
++            let nd = d - pops + pushes;
++            t.vs.truncate(d - pops);
++            t.vs.resize(nd, V::Mem);
++            if nd > 0 {
++                match tos {
++                    Tos::Local(off) => t.vs[nd - 1] = V::Local(off, false),
++                    Tos::Regs => t.vs[nd - 1] = V::Regs,
++                    Tos::Mem => {}
++                }
++            }
++            tos = Tos::Mem;
++        }
 +    }
 +    // Verified code never gets here; leave with status 4 if it did.
 +    a.movz_w(0, 4);
 +    a.branch(Fix::B, Target::Exit);
-+    let exit = a.code.len();
-+    a.epilogue();
++    let (pool, count) = match typer {
++        Some(mut t) => {
++            for c in std::mem::take(&mut t.cold) {
++                emit_cold(&mut a, lay, c);
++            }
++            (POOL.filter(|r| t.used & 1 << (r - 22) != 0).collect::<Vec<u32>>(), t.count)
++        }
++        None => (Vec::new(), 0),
++    };
++    let mut exit = a.code.len();
++    a.epilogue(&pool);
++    // The saves of the registers of `POOL` used, in the prologue's room; the
++    // rest of it taken out, every position after it moved back.
++    for (k, &r) in pool.iter().enumerate() {
++        a.code[pool_at + k] = 0xF900_0000 | ((pool_save(r) / 8) as u32) << 10 | SP << 5 | r; // str x<r>, [sp, #off]
++    }
++    let cut = pool_at + pool.len();
++    let gone = POOL.count() - pool.len();
++    if gone > 0 {
++        a.code.drain(cut..cut + gone);
++        for f in &mut a.fixups {
++            if f.0 >= cut {
++                f.0 -= gone;
++            }
++            if let Target::Code(c) = &mut f.1
++                && *c != usize::MAX
++                && *c >= cut
++            {
++                *c -= gone;
++            }
++        }
++        for l in labels.iter_mut() {
++            if *l != usize::MAX && *l >= cut {
++                *l -= gone;
++            }
++        }
++        exit -= gone;
++    }
 +    if !a.resolve(&labels, exit) {
 +        return Err("bad branch".into());
 +    }
-+    Ok((a.code, labels, exit))
++    Ok((a.code, labels, exit, count))
++}
++
++/// Where the prologue saves register r of `POOL`.
++fn pool_save(r: u32) -> usize {
++    40 + 8 * (r - 22) as usize
 +}
 +
 +// ---------------------------------------------------------------- helpers
@@ -3741,6 +4990,41 @@ index 000000000..7164463c5
 +                state().dm_refused += 1;
 +            }
 +        }
++        0
++    }
++}
++
++/// Typed code hands op `idx` and the rest of the call to the interpreter,
++/// at `depth`, everything written back (`Cold`): a domain memory view it
++/// could not take, an error that did not come, a `check` that failed. The
++/// method is interpreted from then on (status 3).
++unsafe extern "C" fn h_deopt(ctx: *mut Ctx, depth: u32, idx: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        c.resume_ip = idx as usize;
++        let s = state();
++        s.deopts += 1;
++        *s.deopt_ops.entry("typed".into()).or_insert(0) += 1;
++        3
++    }
++}
++
++/// `check`: op `idx` found no int where `analyze` proved one. Counted under
++/// the method's name; `h_deopt` follows.
++unsafe extern "C" fn h_typefail(ctx: *mut Ctx, _: u32, idx: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        let mut name = crate::string::WString::new();
++        if let CallerMovie::Method(m) = act.caller_movie {
++            crate::avm2::function::display_function(&mut name, m);
++        }
++        let op = op_name(&*c.ops.add(idx as usize));
++        let s = state();
++        s.typefails += 1;
++        *s.typefail_ops.entry(format!("{} #{idx} {op}", name.to_utf8_lossy())).or_insert(0) += 1;
 +        0
 +    }
 +}
@@ -3983,6 +5267,8 @@ index 000000000..7164463c5
 +    t[H_TRUTHY] = h_truthy as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_SWITCH] = h_switch as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_DM] = h_dm as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_DEOPT] = h_deopt as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_TYPEFAIL] = h_typefail as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +}
@@ -4087,6 +5373,10 @@ index 000000000..7164463c5
 +    s.deopts = 0;
 +    s.deopt_ops.clear();
 +    s.runs = 0;
++    s.typed_ops = 0;
++    s.all_ops = 0;
++    s.typefails = 0;
++    s.typefail_ops.clear();
 +    s.map.clear();
 +}
 +
@@ -4103,7 +5393,7 @@ index 000000000..7164463c5
 +    };
 +    let l = &s.layout;
 +    let out = format!(
-+"{} (rc=0x{:x}, bool {}, numbers {}, setslot {}, getslot {:?} slots@{}/{} {}, crossbridge {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs, calls {} direct / {} slow [{}] [{}], domain memory views {} ({} refused)",
++"{} (rc=0x{:x}, bool {}, numbers {}, setslot {}, getslot {:?} slots@{}/{} {}, crossbridge {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs, calls {} direct / {} slow [{}] [{}], domain memory views {} ({} refused), ints {} ({} of {} ops typed, check {}, {} wrong [{}])",
 +        if s.init == 1 { "on" } else { "UNAVAILABLE" },
 +        s.init_rc,
 +        if l.bool_ok { "inline" } else { "helper" },
@@ -4132,7 +5422,13 @@ index 000000000..7164463c5
 +            .join(", "),
 +        top(&s.slow_names),
 +        s.dm_views,
-+        s.dm_refused
++        s.dm_refused,
++        if INTS.load(AtomicOrdering::Relaxed) { "on" } else { "off" },
++        s.typed_ops,
++        s.all_ops,
++        if CHECK.load(AtomicOrdering::Relaxed) { "on" } else { "off" },
++        s.typefails,
++        top(&s.typefail_ops)
 +    );
 +    s.slow_why = [0; SLOW_WHY.len()];
 +    s.slow_names.clear();
@@ -4345,6 +5641,213 @@ index 000000000..7164463c5
 +            }
 +        }
 +    }
++
++/// FlashNX: `analyze` on CrossBridge-like code, and the code `emit` makes of
++/// it written to `<temp>/flashnx_jit_typed/<name>.bin` (with a `.map` of the
++/// op offsets), for `aarch64-none-elf-objdump -D -b binary -m aarch64`. Code
++/// memory is the console's: never touched here.
++#[cfg(test)]
++mod typed_tests {
++    use super::*;
++
++    #[unsafe(no_mangle)]
++    extern "C" fn flashnx_jit_init(_: usize, _: *mut *mut u8, _: *mut *mut u8) -> u32 {
++        0
++    }
++    #[unsafe(no_mangle)]
++    extern "C" fn flashnx_jit_flush(_: *mut u8, _: *mut u8, _: usize) {}
++
++    fn build(name: &str, ops: &[Op<'static>], entry: &[Ty], ms: usize) -> Types {
++        let (depth, target) = shape(ops, ms).unwrap();
++        let ty = analyze(ops, &depth, &target, entry).expect("analyze");
++        let mut lay = Layout::default();
++        probe_bool(&mut lay);
++        probe_numbers(&mut lay);
++        assert!(lay.words_ok);
++        let (code, labels, exit, typed) =
++            emit(&lay, ops, &depth, &target, entry.len(), true, 0, true, Some(&ty), true).unwrap();
++        let dir = std::env::temp_dir().join("flashnx_jit_typed");
++        std::fs::create_dir_all(&dir).unwrap();
++        let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
++        std::fs::write(dir.join(format!("{name}.bin")), bytes).unwrap();
++        let mut map = format!("int_tag {} int_word {:x} num_word {:x}\n", lay.int_tag, lay.int_word, lay.num_word);
++        for (i, op) in ops.iter().enumerate() {
++            map += &format!("{:x} {i} {}\n", labels[i] * 4, op_name(op));
++        }
++        map += &format!("{:x} (exit)\n", exit * 4);
++        std::fs::write(dir.join(format!("{name}.map")), map).unwrap();
++        println!("{name}: {typed} of {} ops typed, {} words, {}", ops.len(), code.len(), dir.display());
++        ty
++    }
++
++    use Op::*;
++    const RET: Op<'static> = ReturnVoid { return_type: None };
++
++    #[test]
++    fn address_and_products() {
++        let ops = [
++            GetLocal { index: 1 },
++            PushInt { value: 4 },
++            Add,
++            Li16,
++            Sxi16,
++            SetLocal { index: 2 },
++            GetLocal { index: 2 },
++            PushInt { value: 3 },
++            Multiply,
++            CoerceI,
++            SetLocal { index: 3 },
++            GetLocal { index: 1 },
++            GetLocal { index: 2 },
++            Multiply,
++            CoerceI,
++            SetLocal { index: 3 },
++            RET,
++        ];
++        let t = build("address", &ops, &[Ty::Any, Ty::Int, Ty::Any, Ty::Any], 4);
++        assert!(t.wrap[2] && !t.round[2]);
++        assert_eq!(t.lt[6], Ty::Int);
++        assert!(t.wrap[8] && !t.round[8]);
++        assert!(t.wrap[13] && t.round[13]);
++    }
++
++    /// SMBC's `Enum()`: `getlocal 4, kill 4, setproperty` (here `setlocal`):
++    /// the value is the local's before the kill, read from the frame after.
++    #[test]
++    fn local_killed_under_it() {
++        let ops = [
++            PushInt { value: 7 },
++            SetLocal { index: 1 },
++            GetLocal { index: 1 },
++            Kill { index: 1 },
++            SetLocal { index: 2 },
++            RET,
++        ];
++        build("kill", &ops, &[Ty::Any, Ty::Any, Ty::Any], 2);
++    }
++
++    #[test]
++    fn loop_and_branch() {
++        let ops = [
++            PushInt { value: 0 },
++            SetLocal { index: 1 },
++            GetLocal { index: 1 },
++            PushInt { value: 1 },
++            Add,
++            CoerceI,
++            SetLocal { index: 1 },
++            GetLocal { index: 1 },
++            PushInt { value: 100 },
++            LessThan,
++            IfTrue { offset: 2 },
++            RET,
++        ];
++        let t = build("loop", &ops, &[Ty::Any, Ty::Any], 4);
++        assert_eq!(t.lt[2], Ty::Int);
++        assert!(t.wrap[4]);
++        assert!(t.fuse[9]);
++    }
++
++    #[test]
++    fn not_ints() {
++        // A Number joins the loop: the local is no int at its head.
++        let ops = [
++            PushInt { value: 0 },
++            SetLocal { index: 1 },
++            GetLocal { index: 1 },
++            PushDouble { value: 0.5 },
++            Add,
++            SetLocal { index: 1 },
++            GetLocal { index: 1 },
++            PushInt { value: 3 },
++            LessThan,
++            IfTrue { offset: 2 },
++            GetLocal { index: 2 },
++            GetLocal { index: 3 },
++            Add,
++            SetLocal { index: 2 },
++            RET,
++        ];
++        let t = build("notints", &ops, &[Ty::Any, Ty::Any, Ty::Int, Ty::Int], 4);
++        assert_eq!(t.lt[2], Ty::Any);
++        assert!(!t.fuse[8]);
++        // Read whole (SetLocal): an int + int that may overflow, not wrapped.
++        assert!(!t.wrap[12]);
++    }
++
++    #[test]
++    fn memory() {
++        let ops = [
++            GetLocal { index: 2 },
++            GetLocal { index: 1 },
++            PushInt { value: 8 },
++            Add,
++            Si32,
++            GetLocal { index: 1 },
++            Lf64,
++            GetLocal { index: 1 },
++            PushInt { value: 16 },
++            Add,
++            Sf64,
++            GetLocal { index: 1 },
++            Li8,
++            GetLocal { index: 1 },
++            Si8,
++            RET,
++        ];
++        let t = build("memory", &ops, &[Ty::Any, Ty::Int, Ty::Int], 4);
++        assert!(t.wrap[3] && t.wrap[9]);
++    }
++
++    #[test]
++    fn bits_and_pressure() {
++        let mut ops = std::vec![
++            GetLocal { index: 1 },
++            PushInt { value: 3 },
++            LShift,
++            GetLocal { index: 2 },
++            PushInt { value: 255 },
++            BitAnd,
++            BitOr,
++            PushInt { value: 2 },
++            URShift,
++            SetLocal { index: 3 },
++            GetLocal { index: 1 },
++            PushInt { value: 0 },
++            URShift,
++            CoerceI,
++            SetLocal { index: 3 },
++        ];
++        // Nine bytes on the stack: more than `POOL`.
++        for k in 0..9 {
++            ops.push(GetLocal { index: 1 });
++            ops.push(PushInt { value: k });
++            ops.push(Add);
++            ops.push(Li8);
++        }
++        for _ in 0..8 {
++            ops.push(Add);
++        }
++        ops.push(CoerceI);
++        ops.push(SetLocal { index: 3 });
++        ops.push(GetLocal { index: 1 });
++        ops.push(Dup);
++        ops.push(Add);
++        ops.push(GetLocal { index: 2 });
++        ops.push(Swap);
++        ops.push(Subtract);
++        ops.push(CoerceI);
++        ops.push(SetLocal { index: 3 });
++        ops.push(RET);
++        let t = build("bits", &ops, &[Ty::Any, Ty::Int, Ty::Int, Ty::Any], 12);
++        assert!(!t.wrap[8]); // by 2: an int whatever it reads
++        assert!(t.wrap[12]); // by 0, read as ToInt32
++        let first_add = 15 + 4 * 9;
++        for k in 0..8 {
++            assert!(t.wrap[first_add + k], "add {k}");
++        }
++    }
++}
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -11523,7 +13026,7 @@ index 91bdb52df..caf29d1b5 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..5f3df4f35 100644
+index 6e5379213..77d222823 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -11553,8 +13056,8 @@ index 6e5379213..5f3df4f35 100644
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use avm2::activation::{
-+    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_crossbridge,
-+    set_jit_direct_calls, set_jit_map, set_jit_tos_cache,
++    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_check,
++    set_jit_crossbridge, set_jit_direct_calls, set_jit_ints, set_jit_map, set_jit_tos_cache,
 +};
 +pub use avm1::set_avm1_fast_push;
 +
