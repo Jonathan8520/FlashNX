@@ -13418,10 +13418,10 @@ index 000000000..61d84324a
 +    line
 +}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
-index 91bdb52df..caf29d1b5 100644
+index 91bdb52df..896c0d313 100644
 --- a/core/src/frame_lifecycle.rs
 +++ b/core/src/frame_lifecycle.rs
-@@ -18,6 +18,98 @@ use crate::loader::LoadManager;
+@@ -18,6 +18,117 @@ use crate::loader::LoadManager;
  use crate::orphan_manager::OrphanManager;
  use tracing::instrument;
  
@@ -13442,6 +13442,15 @@ index 91bdb52df..caf29d1b5 100644
 +
 +pub fn set_orphan_skip(enabled: bool) {
 +    ORPHAN_SKIP.store(enabled, Ordering::Relaxed);
++}
++
++/// FlashNX: whether full frames find their dirty orphans through the queue
++/// instead of walking the list (`run_all_phases_avm2`). Off from FlashNX's
++/// `frameorphans.off` marker, to compare.
++static FRAME_ORPHAN_QUEUE: AtomicBool = AtomicBool::new(true);
++
++pub fn set_frame_orphan_queue(enabled: bool) {
++    FRAME_ORPHAN_QUEUE.store(enabled, Ordering::Relaxed);
 +}
 +
 +/// FlashNX: whether an explicit goto on an AVM1 clip leaves out the inner
@@ -13506,6 +13515,16 @@ index 91bdb52df..caf29d1b5 100644
 +    true
 +}
 +
++/// FlashNX: the longest the orphan list was at the start of a full frame since
++/// the last `take_orphan_list_max`. Every full frame walks it in each of its
++/// phases (Super Mario Bros. Crossover's level 2: 14 % of the frame in the walk
++/// itself, 2026-10-24).
++static ORPHAN_LIST_MAX: AtomicU64 = AtomicU64::new(0);
++
++pub fn take_orphan_list_max() -> u64 {
++    ORPHAN_LIST_MAX.swap(0, Ordering::Relaxed)
++}
++
 +/// (inner gotos, orphans processed by them, orphans skipped, gotos that did not
 +/// even iterate the orphan list) since the last call.
 +pub fn take_inner_goto_stats() -> (u64, u64, u64, u64) {
@@ -13520,12 +13539,13 @@ index 91bdb52df..caf29d1b5 100644
  /// Which phase of the frame we're currently in.
  ///
  /// AVM2 frames exist in one of four phases: `Enter`, `Construct`,
-@@ -77,24 +169,54 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+@@ -77,24 +188,86 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
          return;
      }
  
 +    #[cfg(feature = "flashnx_census")]
 +    crate::flashnx_census::note_frame(context.orphan_manager.len(), context.avm2.broadcast_len());
++    ORPHAN_LIST_MAX.fetch_max(context.orphan_manager.len() as u64, Ordering::Relaxed);
 +
 +    // FlashNX: full frames pass over unchanged subtrees too (see
 +    // `display_object::set_full_frame_skip`): quiet ones while entering the
@@ -13544,29 +13564,65 @@ index 91bdb52df..caf29d1b5 100644
      stage.enter_frame(context);
  
      *context.frame_phase = FramePhase::Construct;
+-    OrphanManager::each_orphan_obj(context, |orphan, context| {
+-        orphan.construct_frame(context);
+-    });
 +    let was_skipping = crate::display_object::set_skipping_clean_subtrees(full_skip);
-     OrphanManager::each_orphan_obj(context, |orphan, context| {
-+        if crate::display_object::skip_clean_child(orphan) {
-+            return;
++    // FlashNX: with clean subtrees skipped, these two passes only ever run on
++    // the dirty orphans, which the queue of the inner gotos already lists in
++    // orphan-list order (`for_each_dirty_orphan`, same objects, same order):
++    // no need to walk the whole list to find them. Super Mario Bros.
++    // Crossover's level 2 keeps thousands of orphans and spent 14 % of its
++    // frames in the walks themselves (2026-10-24). `frameorphans.off`: walk.
++    let queued = crate::display_object::skipping_clean_subtrees()
++        && ORPHAN_SKIP.load(Ordering::Relaxed)
++        && FRAME_ORPHAN_QUEUE.load(Ordering::Relaxed);
++    if queued {
++        let done = for_each_dirty_orphan(context, |orphan, context| {
++            orphan.construct_frame(context);
++        });
++        // Constructing does not clean them: the frame-script pass below must
++        // find them again.
++        for orphan in done {
++            crate::display_object::queue_dirty_orphan(orphan);
 +        }
-         orphan.construct_frame(context);
-     });
++    } else {
++        OrphanManager::each_orphan_obj(context, |orphan, context| {
++            if crate::display_object::skip_clean_child(orphan) {
++                return;
++            }
++            orphan.construct_frame(context);
++        });
++    }
      stage.construct_frame(context);
 +    crate::display_object::set_skipping_clean_subtrees(was_skipping);
      broadcast_frame_constructed(context);
  
      *context.frame_phase = FramePhase::FrameScripts;
+-    OrphanManager::each_orphan_obj(context, |orphan, context| {
 +    let epoch = crate::display_object::orphan_mark_epoch();
 +    let mut left_dirty = false;
 +    let was_skipping = crate::display_object::set_skipping_clean_subtrees(full_skip);
-     OrphanManager::each_orphan_obj(context, |orphan, context| {
-+        if crate::display_object::skip_clean_child(orphan) {
-+            return;
-+        }
++    fn run_scripts<'gc>(
++        orphan: DisplayObject<'gc>,
++        context: &mut UpdateContext<'gc>,
++        left_dirty: &mut bool,
++    ) {
 +        orphan.base().set_lifecycle_dirty(false);
          orphan.run_frame_scripts(context);
-+        left_dirty |= orphan.base().lifecycle_dirty();
-     });
+-    });
++        *left_dirty |= orphan.base().lifecycle_dirty();
++    }
++    if queued && crate::display_object::skipping_clean_subtrees() {
++        for_each_dirty_orphan(context, |orphan, context| run_scripts(orphan, context, &mut left_dirty));
++    } else {
++        OrphanManager::each_orphan_obj(context, |orphan, context| {
++            if crate::display_object::skip_clean_child(orphan) {
++                return;
++            }
++            run_scripts(orphan, context, &mut left_dirty);
++        });
++    }
 +    if !left_dirty {
 +        note_orphans_clean_if_unmarked(epoch);
 +    }
@@ -13575,7 +13631,7 @@ index 91bdb52df..caf29d1b5 100644
      run_frame_script_cleanup(context);
  
      *context.frame_phase = FramePhase::Exit;
-@@ -130,6 +252,12 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -130,6 +303,12 @@ pub fn run_inner_goto_frame<'gc>(
          // We skip the next `enter_frame` call, so that we will still run the framescripts
          // queued for our target frame.
          initial_clip.base().set_skip_next_enter_frame(true);
@@ -13588,7 +13644,7 @@ index 91bdb52df..caf29d1b5 100644
  
          return;
      }
-@@ -143,18 +271,64 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -143,18 +322,64 @@ pub fn run_inner_goto_frame<'gc>(
  
      // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
  
@@ -13658,7 +13714,7 @@ index 91bdb52df..caf29d1b5 100644
  
      for child in removed_frame_scripts {
          child.run_frame_scripts(context);
-@@ -168,11 +342,66 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -168,11 +393,66 @@ pub fn run_inner_goto_frame<'gc>(
      // Instead, we do one cleanup at the end of the frame.
      // This performs special handling of clips which became orphaned as
      // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
@@ -13727,7 +13783,7 @@ index 91bdb52df..caf29d1b5 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..2f677ca6d 100644
+index 6e5379213..2f4c58190 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -13779,7 +13835,7 @@ index 6e5379213..2f677ca6d 100644
 +pub use bitmap::operations::{take_threshold_memo_hits, take_threshold_stats};
 +pub use frame_lifecycle::{
 +    set_avm1_inner_goto_skip, set_avm1_unloaded_quiet, set_orphan_skip, take_avm1_inner_skipped,
-+    take_avm1_unloaded_skipped, take_inner_goto_stats,
++    take_avm1_unloaded_skipped, take_inner_goto_stats, take_orphan_list_max, set_frame_orphan_queue,
 +};
 +pub use display_object::set_lazy_shapes;
 +pub use display_object::{set_full_frame_skip, set_stage_skip, take_enter_skipped, take_subtrees_skipped};
@@ -13803,7 +13859,7 @@ index 6e5379213..2f677ca6d 100644
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
 +/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
-+pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost, set_script_hook};
++pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost, set_script_hook, take_mouse_picks};
 +pub use player::set_bitmap_cache;
 +pub use player::set_gc_small_pacing;
 +pub use display_object::set_flashnx_mask_fixes;
@@ -14464,7 +14520,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..a41485fb1 100644
+index edb74cccb..f77de3fed 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -15256,7 +15312,7 @@ index edb74cccb..a41485fb1 100644
          let audio = self
              .audio
              .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
-@@ -3173,6 +3863,61 @@ pub struct DragObject<'gc> {
+@@ -3173,10 +3863,77 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  
@@ -15315,9 +15371,25 @@ index edb74cccb..a41485fb1 100644
 +    root.data.borrow_mut(fc).library.finalize_released(fc)
 +}
 +
++/// FlashNX: display-tree walks for what is under the mouse, since the last
++/// `take_mouse_picks`. One per `update` while the mouse is on the stage, which
++/// FlashNX now only says once the pointer has been used (Super Mario Bros.
++/// Crossover's level 2, played with the controller: 29 % of the frame picking
++/// at (0, 0), 2026-10-24).
++static MOUSE_PICKS: AtomicU64 = AtomicU64::new(0);
++
++pub fn take_mouse_picks() -> u64 {
++    MOUSE_PICKS.swap(0, Ordering::Relaxed)
++}
++
  fn run_mouse_pick<'gc>(
      context: &mut UpdateContext<'gc>,
      require_button_mode: bool,
+ ) -> Option<InteractiveObject<'gc>> {
++    MOUSE_PICKS.fetch_add(1, Ordering::Relaxed);
+     context.stage.iter_render_list().rev().find_map(|level| {
+         level.as_interactive().and_then(|l| {
+             if l.as_displayobject().movie().is_action_script_3() {
 diff --git a/core/src/tag_utils.rs b/core/src/tag_utils.rs
 index 0b826d7c0..fa94d0771 100644
 --- a/core/src/tag_utils.rs

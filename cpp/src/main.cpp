@@ -225,6 +225,7 @@ extern "C" void ruffle_library_bank_playtime(void);
 
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
+extern "C" void ruffle_place_mouse(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
@@ -1799,7 +1800,9 @@ static void worker_entry(void* arg) {
     // In-game cursor: lives in the GAME's render space.
     float cursor_x = GAME_VIEWPORT_W * 0.5f;
     float cursor_y = GAME_VIEWPORT_H * 0.5f;
-    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+    // Centring is not a use of the pointer: it stays off the stage until the
+    // player moves it (ruffle_init, lib.rs).
+    ruffle_place_mouse((int)cursor_x, (int)cursor_y);
     // After a Restart: the new Player draws the cursor in the middle, so it
     // goes back there. It used to keep its old position here, and the first
     // move made it jump back to where it was before the restart. The
@@ -1807,7 +1810,7 @@ static void worker_entry(void* arg) {
     auto recenter_cursor = [&]() {
         cursor_x = GAME_VIEWPORT_W * 0.5f;
         cursor_y = GAME_VIEWPORT_H * 0.5f;
-        ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+        ruffle_place_mouse((int)cursor_x, (int)cursor_y);
         g_aim_valid = false;
         g_tilt_anchor_valid = false;
     };
@@ -2279,7 +2282,7 @@ static void worker_entry(void* arg) {
                 if (kDown & HidNpadButton_A) {
                     ruffle_ui_sound(UI_SFX_DECIDE);
                     ruffle_zoom_commit();
-                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    ruffle_place_mouse((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
@@ -2287,7 +2290,7 @@ static void worker_entry(void* arg) {
                 } else if (kDown & HidNpadButton_B) {
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
-                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    ruffle_place_mouse((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
@@ -2299,7 +2302,7 @@ static void worker_entry(void* arg) {
                     // as A would. It used to throw the framing away and stay on
                     // ÉCRAN, a second `-` away from the game.
                     ruffle_zoom_commit();
-                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    ruffle_place_mouse((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
                     screen_menu = false;
@@ -2440,7 +2443,7 @@ static void worker_entry(void* arg) {
                     screen_menu = false;
                     pause_repeat_reset(pause_rep);
                     ruffle_ui_sound(UI_SFX_BACK);
-                    if (changed) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    if (changed) ruffle_place_mouse((int)cursor_x, (int)cursor_y);
                     ruffle_redraw_paused();
                     ruffle_draw_menu(menu_selection);
                     gl_context_swap();
@@ -2474,7 +2477,7 @@ static void worker_entry(void* arg) {
                         ruffle_ui_sound(UI_SFX_DECIDE);
                     }
                 }
-                if (changed) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                if (changed) ruffle_place_mouse((int)cursor_x, (int)cursor_y);
                 ruffle_redraw_paused();
                 ruffle_draw_screen_menu(screen_selection);
                 gl_context_swap();

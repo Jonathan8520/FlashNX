@@ -563,6 +563,36 @@ with the NES emulator and 2-4 ms with the SNES one; SNES level 1 at 60 fps media
 effects ~16 -> ~8 s. Jonathan: the music sounds the same, except perhaps the first
 tick of the end-of-level timer, a little louder.
 
+**`core/src/frame_lifecycle.rs`, `player.rs`: full frames take their dirty
+orphans from the queue; counters for the orphan list and mouse picks (FlashNX
+#136).**
+
+Super Mario Bros. Crossover's level 2 ran at 23-54 fps at 1785 MHz, with
+17-23 ms of `tick` a frame. The sampling profile: 29 % in `update_mouse_state`
+-> `run_mouse_pick` (FlashNX side, below), 16 % in `each_orphan_obj`, 14 % of it
+the walk itself (the game keeps up to 17 000 orphans: clips it removed and
+keeps). With clean subtrees skipped, a full frame's construct and frame-script
+passes only ever run on dirty orphans; they now take them from the queue the
+inner gotos use (`for_each_dirty_orphan`, same objects, same order, constructed
+ones queued again for the script pass) instead of walking the list. Every place
+that dirties the top of an orphan tree queues it (`mark_lifecycle_dirty`,
+`settle_lifecycle_dirty`, `Avm2Button::run_frame_scripts`, `add_orphan_obj`),
+which the inner gotos already relied on. `frameorphans.off` marker. The `gotos:`
+line now gives `orphan list up to N` and `mouse picks N`.
+
+FlashNX side (`rust/src/lib.rs`, `cpp/src/main.cpp`): Ruffle's `mouse_in_stage`
+starts true and only the desktop and web frontends drive it, so Ruffle walked the
+whole display tree for what was under a mouse at (0, 0) after every `update`.
+The pointer is now off the stage until it is used (stick, touch, gyro, click);
+centring it at start and re-sending its position after a framing change
+(`ruffle_place_mouse`) do not count. `pointeridle.off` marker.
+
+On hardware, level 2: 0 mouse picks, 48-58 fps with the console staying at
+1020 MHz (19 ms a frame on average, against 26-27 ms at 1785 MHz before);
+level 1 at 60 fps at 1020 MHz. Ruffle AVM2 suite: 1067 pass, only
+`stage3d_rotating_cube` fails, as before. Left: the enterFrame pass still walks
+every orphan (~11 %), and `cleanup_dead_orphans` (~4 %).
+
 **`core/src/avm2/globals/flash/media/sound.rs`, `avm2/object/sound_object.rs`,
 `backend/audio.rs`, `backend/audio/mixer.rs`, `context.rs`: `SampleDataEvent`
 (backport of upstream PR ruffle#24762, closed unmerged).**

@@ -1787,6 +1787,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !goto_skip {
         log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/frameorphans.off`: full frames walk the whole
+    // orphan list to construct and script the dirty ones, instead of taking
+    // them from the queue the inner gotos use (`set_frame_orphan_queue`).
+    let frame_orphans = !backend::render::marker_present("frameorphans.off");
+    ruffle_core::set_frame_orphan_queue(frame_orphans);
+    if !frame_orphans {
+        log(b"gotos: frameorphans.off present -> full frames walk every orphan\n\0");
+    }
     // `sdmc:/switch/FlashNX/avm1goto.off`: an AS2 gotoAndStop/nextFrame runs
     // the AS3 inner frame again, as upstream does (see
     // `explicit_goto_runs_inner_frame` in our Ruffle). Same kind of switch.
@@ -1974,6 +1982,21 @@ pub extern "C" fn ruffle_init() -> c_int {
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();
     log(b"ruffle_init: PlayerBuilder::build() returned\n\0");
+    // The pointer is off the stage until it is used, as a desktop mouse is
+    // until it enters the window (`set_mouse_in_stage`, which Ruffle's desktop
+    // and web frontends drive and which starts true). On the stage, Ruffle
+    // walks the whole display tree for what is under it after every `update`:
+    // Super Mario Bros. Crossover's level 2, played with the controller, spent
+    // 29 % of its frames picking at (0, 0) (2026-10-24). The first move of the
+    // cursor (stick, touch, gyro) or the first click puts it on the stage.
+    // `sdmc:/switch/FlashNX/pointeridle.off`: on the stage from the start.
+    if !backend::render::marker_present("pointeridle.off") {
+        if let Ok(mut p) = player.lock() {
+            p.set_mouse_in_stage(false);
+        }
+    } else {
+        log(b"mouse: pointeridle.off present -> the pointer is on the stage from the start\n\0");
+    }
 
     unsafe {
         STATE = Some(State {
@@ -4671,6 +4694,21 @@ pub extern "C" fn ruffle_handle_key(code: c_int, down: bool) {
 /// is deflected or a touch event happens.
 #[no_mangle]
 pub extern "C" fn ruffle_handle_mouse_move(x: c_int, y: c_int) {
+    move_cursor(x, y, true);
+}
+
+/// Place the virtual cursor without it counting as a use of the pointer: in
+/// the middle when a game starts or restarts, or where it already is after the
+/// screen's framing changed. It stays off the stage until the player moves it
+/// (see `ruffle_init`): the first build of this centred it with
+/// `ruffle_handle_mouse_move` and the picking never stopped. Otherwise as
+/// `ruffle_handle_mouse_move`.
+#[no_mangle]
+pub extern "C" fn ruffle_place_mouse(x: c_int, y: c_int) {
+    move_cursor(x, y, false);
+}
+
+fn move_cursor(x: c_int, y: c_int, used: bool) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
@@ -4714,6 +4752,10 @@ pub extern "C" fn ruffle_handle_mouse_move(x: c_int, y: c_int) {
     state.cursor_stage_x = gx;
     state.cursor_stage_y = gy;
     if let Ok(mut p) = state.player.lock() {
+        // The pointer is used: it is on the stage from now on (see `ruffle_init`).
+        if used {
+            p.set_mouse_in_stage(true);
+        }
         p.handle_event(PlayerEvent::MouseMove {
             x: gx as f64,
             y: gy as f64,
@@ -4745,6 +4787,7 @@ fn handle_mouse_button_impl(button: MouseButton, down: bool) {
         } else {
             PlayerEvent::MouseUp { x, y, button }
         };
+        p.set_mouse_in_stage(true);
         p.handle_event(event);
     }
 }
