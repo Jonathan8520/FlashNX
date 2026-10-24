@@ -1862,6 +1862,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !gc_small {
         log(b"gc: gcsmall.off present -> default pacing on small heaps\n\0");
     }
+    // `sdmc:/switch/FlashNX/gcassist.off`: dead bitmaps get no collector time
+    // between frames, only the full collection once they grew by 32 MB
+    // (`bitmapdata_assist_budget_us` in our Ruffle).
+    let gc_assist = !backend::render::marker_present("gcassist.off");
+    ruffle_core::bitmap::bitmap_data::set_bitmapdata_gc_assist(gc_assist);
+    if !gc_assist {
+        log(b"gc: gcassist.off present -> full collections only for dead bitmaps\n\0");
+    }
     // `sdmc:/switch/FlashNX/fastcall.off`: upstream's AVM2 call path (an Arc
     // clone per call, the receiver check, the whole new frame cleared), see
     // `set_fast_calls` in our Ruffle.

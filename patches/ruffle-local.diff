@@ -8948,10 +8948,10 @@ index 9d02cc0ac..8eda73583 100644
  
  impl Default for NullExecutor {
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 29eb34fdc..d8c9a95fd 100644
+index 29eb34fdc..eb7c33e5b 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
-@@ -15,6 +15,162 @@ use std::ops::Range;
+@@ -15,6 +15,222 @@ use std::ops::Range;
  use swf::{Rectangle, Twips};
  use tracing::instrument;
  
@@ -9048,10 +9048,70 @@ index 29eb34fdc..d8c9a95fd 100644
 +/// 20-70 MB, each of which still gets its full cycle.
 +const BITMAPDATA_REGROWTH_BYTES: u64 = 32 * 1024 * 1024;
 +
-+/// FlashNX: a full collection just ended: what BitmapData holds now is alive.
++/// FlashNX: a collection cycle just ended (a full one, or an incremental one
++/// when the assist below is on): what BitmapData holds now is alive.
 +pub fn bitmapdata_note_full_gc() {
 +    use std::sync::atomic::Ordering;
 +    BITMAPDATA_AFTER_FULL_GC.store(BITMAPDATA_LIVE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
++}
++
++/// FlashNX: growth of live BitmapData bytes past the last cycle from which the
++/// collector gets help between frames (`Player::assist_collect`), so that its
++/// cycle ends before the growth reaches `BITMAPDATA_REGROWTH_BYTES` and the
++/// full collection, which stays as the safety net.
++///
++/// Why: gc-arena's incremental collector is paid by the bytes of GC objects
++/// allocated, and pixels are not one. Super Mario Bros. Crossover keeps
++/// ~350 MB of bitmaps alive and drops ~30 MB more every 30-60 s while
++/// allocating few objects, so its cycle crawled at ~0.1 ms a frame and never
++/// ended in time: 7 full collections of 0.4-1.4 s in 3.5 minutes of play
++/// (2026-10-23), 73 % of them sweeping ~600 000 dead objects. Flash Player
++/// did this on purpose: MMgc's `SignalDependentAllocation` counted the pixels
++/// as allocation work that drives its incremental collector. gc-arena's own
++/// external allocation was removed upstream as too hard to pace (gc-arena #139),
++/// hence a time budget here rather than a debt per pixel byte.
++const BITMAPDATA_ASSIST_BYTES: u64 = 12 * 1024 * 1024;
++
++/// FlashNX: collector time per host frame at `BITMAPDATA_ASSIST_BYTES` of
++/// growth, rising linearly to the maximum at `BITMAPDATA_REGROWTH_BYTES`. A
++/// cycle of SMBC is ~0.5-0.9 s of work: at the minimum it ends within 10-30 s,
++/// before ~10 MB more of dead bitmaps, and the closer the full collection the
++/// harder the collector is pushed.
++const BITMAPDATA_ASSIST_MIN_US: u64 = 500;
++const BITMAPDATA_ASSIST_MAX_US: u64 = 4000;
++
++/// FlashNX: the assist on (default) or off (`gcassist.off` marker): off, only
++/// the full collection of `bitmapdata_under_pressure` remains, as before.
++static BITMAPDATA_GC_ASSIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_bitmapdata_gc_assist(enabled: bool) {
++    BITMAPDATA_GC_ASSIST.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn bitmapdata_gc_assist() -> bool {
++    BITMAPDATA_GC_ASSIST.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++/// FlashNX: how long the collector should run this host frame to keep up with
++/// dead bitmaps, in microseconds, or 0 when it needs no help. Same gate as
++/// `bitmapdata_under_pressure` (half the budget), which runs before it and
++/// keeps the base at its lowest point.
++pub fn bitmapdata_assist_budget_us() -> u64 {
++    use std::sync::atomic::Ordering;
++    if BITMAPDATA_BUDGET_BYTES == 0 || !bitmapdata_gc_assist() {
++        return 0;
++    }
++    let live = BITMAPDATA_LIVE_BYTES.load(Ordering::Relaxed);
++    if live <= BITMAPDATA_BUDGET_BYTES / 2 {
++        return 0;
++    }
++    let growth = live.saturating_sub(BITMAPDATA_AFTER_FULL_GC.load(Ordering::Relaxed));
++    if growth <= BITMAPDATA_ASSIST_BYTES {
++        return 0;
++    }
++    let span = BITMAPDATA_REGROWTH_BYTES - BITMAPDATA_ASSIST_BYTES;
++    let over = (growth - BITMAPDATA_ASSIST_BYTES).min(span);
++    BITMAPDATA_ASSIST_MIN_US + (BITMAPDATA_ASSIST_MAX_US - BITMAPDATA_ASSIST_MIN_US) * over / span
 +}
 +
 +/// Zero-cost lifetime guard for a `BitmapRawData`'s pixel allocation: adds its
@@ -9114,7 +9174,7 @@ index 29eb34fdc..d8c9a95fd 100644
  /// An implementation of the Lehmer/Park-Miller random number generator
  /// Uses the fixed parameters m = 2,147,483,647 and a = 16,807
  pub struct LehmerRng {
-@@ -251,6 +407,15 @@ impl<'gc> BitmapData<'gc> {
+@@ -251,6 +467,15 @@ impl<'gc> BitmapData<'gc> {
          Self(data)
      }
  
@@ -9130,7 +9190,7 @@ index 29eb34fdc..d8c9a95fd 100644
      pub fn dummy(mc: &Mutation<'gc>) -> Self {
          Self(BitmapRawDataWrapper::dummy(mc))
      }
-@@ -366,9 +531,19 @@ impl<'gc> BitmapData<'gc> {
+@@ -366,9 +591,19 @@ impl<'gc> BitmapData<'gc> {
  #[collect(no_drop)]
  pub struct BitmapRawData<'gc> {
      /// The pixels in the bitmap, stored as a array of pre-multiplied ARGB colour values
@@ -9150,7 +9210,7 @@ index 29eb34fdc..d8c9a95fd 100644
      width: u32,
      height: u32,
      transparency: bool,
-@@ -397,6 +572,18 @@ pub struct BitmapRawData<'gc> {
+@@ -397,6 +632,18 @@ pub struct BitmapRawData<'gc> {
      #[collect(require_static)]
      dirty_state: DirtyState,
  
@@ -9169,7 +9229,7 @@ index 29eb34fdc..d8c9a95fd 100644
      /// Holds an egui texture handle, used for rendering this Bitmap in the debug ui.
      /// This is automatically set to `None` when the texture is updated (either from
      /// marking the CPU side dirty, or from performing a GPU -> CPU sync).
-@@ -404,6 +591,31 @@ pub struct BitmapRawData<'gc> {
+@@ -404,6 +651,31 @@ pub struct BitmapRawData<'gc> {
      pub egui_texture: std::cell::RefCell<Option<egui::TextureHandle>>,
  }
  
@@ -9201,7 +9261,7 @@ index 29eb34fdc..d8c9a95fd 100644
  #[derive(Clone, Debug)]
  pub enum DirtyState {
      // Both the CPU and GPU pixels are up to date. We do not need to wait for any syncs to complete
-@@ -428,7 +640,7 @@ mod wrapper {
+@@ -428,7 +700,7 @@ mod wrapper {
      use ruffle_render::commands::CommandHandler;
      use std::cell::Ref;
  
@@ -9210,7 +9270,7 @@ index 29eb34fdc..d8c9a95fd 100644
  
      /// A wrapper type that ensures that we always wait for a pending
      /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
-@@ -476,6 +688,7 @@ mod wrapper {
+@@ -476,6 +748,7 @@ mod wrapper {
                  mc,
                  BitmapRawData {
                      pixels: Vec::new(),
@@ -9218,7 +9278,7 @@ index 29eb34fdc..d8c9a95fd 100644
                      width: 0,
                      height: 0,
                      transparency: false,
-@@ -484,6 +697,9 @@ mod wrapper {
+@@ -484,6 +757,9 @@ mod wrapper {
                      avm2_object: None,
                      display_objects: vec![],
                      dirty_state: DirtyState::Clean,
@@ -9228,7 +9288,7 @@ index 29eb34fdc..d8c9a95fd 100644
                      #[cfg(feature = "egui")]
                      egui_texture: Default::default(),
                  }
-@@ -499,6 +715,7 @@ mod wrapper {
+@@ -499,6 +775,7 @@ mod wrapper {
              let data = self.sync(renderer).borrow();
              BitmapRawData {
                  pixels: data.pixels.clone(),
@@ -9236,7 +9296,7 @@ index 29eb34fdc..d8c9a95fd 100644
                  width: data.width,
                  height: data.height,
                  transparency: data.transparency,
-@@ -508,6 +725,9 @@ mod wrapper {
+@@ -508,6 +785,9 @@ mod wrapper {
                  display_objects: vec![],
                  // We have no GPU texture, so there's no need to mark as dirty
                  dirty_state: DirtyState::Clean,
@@ -9246,7 +9306,7 @@ index 29eb34fdc..d8c9a95fd 100644
                  #[cfg(feature = "egui")]
                  egui_texture: Default::default(),
              }
-@@ -734,6 +954,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -734,6 +1014,7 @@ impl<'gc> BitmapRawData<'gc> {
                  Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
                  width as usize * height as usize
              ],
@@ -9254,7 +9314,7 @@ index 29eb34fdc..d8c9a95fd 100644
              width,
              height,
              transparency,
-@@ -742,6 +963,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -742,6 +1023,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              display_objects: vec![],
              dirty_state: DirtyState::Clean,
@@ -9264,7 +9324,7 @@ index 29eb34fdc..d8c9a95fd 100644
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
          }
-@@ -754,6 +978,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -754,6 +1038,7 @@ impl<'gc> BitmapRawData<'gc> {
          pixels: Vec<Color>,
      ) -> Self {
          Self {
@@ -9272,7 +9332,7 @@ index 29eb34fdc..d8c9a95fd 100644
              pixels,
              width,
              height,
-@@ -762,6 +987,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -762,6 +1047,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              disposed: false,
              dirty_state: DirtyState::Clean,
@@ -9282,7 +9342,7 @@ index 29eb34fdc..d8c9a95fd 100644
              display_objects: vec![],
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
-@@ -773,9 +1001,12 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -773,9 +1061,12 @@ impl<'gc> BitmapRawData<'gc> {
      }
  
      pub fn dispose(&mut self) {
@@ -9295,7 +9355,7 @@ index 29eb34fdc..d8c9a95fd 100644
          self.bitmap_handle = None;
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
-@@ -823,11 +1054,13 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -823,11 +1114,13 @@ impl<'gc> BitmapRawData<'gc> {
          sync_handle: Box<dyn SyncHandle>,
          region: PixelRegion,
      ) {
@@ -9309,7 +9369,7 @@ index 29eb34fdc..d8c9a95fd 100644
          debug_assert!(region.x_max <= self.width);
          debug_assert!(region.y_max <= self.height);
  
-@@ -853,11 +1086,30 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -853,11 +1146,30 @@ impl<'gc> BitmapRawData<'gc> {
      }
  
      pub fn pixels(&self) -> &[Color] {
@@ -9342,7 +9402,7 @@ index 29eb34fdc..d8c9a95fd 100644
      }
  
      pub fn width(&self) -> u32 {
-@@ -873,11 +1125,15 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -873,11 +1185,15 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
@@ -9358,7 +9418,7 @@ index 29eb34fdc..d8c9a95fd 100644
          let p1 = (x1 + y * self.width) as usize;
          let p2 = (x2 + y * self.width) as usize;
          let slice = &mut self.pixels[p1..p2];
-@@ -886,20 +1142,61 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -886,20 +1202,61 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn fill(&mut self, color: Color) {
@@ -13762,7 +13822,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..07085910c 100644
+index edb74cccb..a41485fb1 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -13781,7 +13841,7 @@ index edb74cccb..07085910c 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +278,286 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +278,292 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -13804,6 +13864,12 @@ index edb74cccb..07085910c 100644
 +static FLASHNX_GC_PHASE: AtomicU8 = AtomicU8::new(0);
 +static FLASHNX_GC_ALLOC: AtomicU64 = AtomicU64::new(0);
 +static FLASHNX_GC_US: AtomicU64 = AtomicU64::new(0);
++/// FlashNX: the collector help of the cycle in progress (`assist_collect`):
++/// time spent, updates that helped, live BitmapData bytes when it began.
++/// Logged and cleared when the cycle ends.
++static FLASHNX_ASSIST_US: AtomicU64 = AtomicU64::new(0);
++static FLASHNX_ASSIST_UPDATES: AtomicU32 = AtomicU32::new(0);
++static FLASHNX_ASSIST_FROM: AtomicU64 = AtomicU64::new(0);
 +/// FlashNX: the frame accumulator after the last `tick`, in microseconds: wall
 +/// time received but not yet turned into frames. The FPS counter adds its
 +/// change over a window to the frames it counted, so the reading is not
@@ -14068,7 +14134,7 @@ index edb74cccb..07085910c 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +801,168 @@ impl Player {
+@@ -519,11 +807,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -14237,7 +14303,7 @@ index edb74cccb..07085910c 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +993,10 @@ impl Player {
+@@ -554,6 +999,10 @@ impl Player {
              }
          }
  
@@ -14248,7 +14314,7 @@ index edb74cccb..07085910c 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -577,6 +1020,10 @@ impl Player {
+@@ -577,6 +1026,10 @@ impl Player {
                  .audio_skew_time(context.audio, cur_frame_offset)
          });
          self.frame_accumulator += FloatDuration::from_secs(audio_skew);
@@ -14259,7 +14325,7 @@ index edb74cccb..07085910c 100644
  
          self.update_sockets();
          self.update_net_connections();
-@@ -2038,10 +2485,33 @@ impl Player {
+@@ -2038,10 +2491,33 @@ impl Player {
          let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
  
          if invalidated {
@@ -14293,7 +14359,7 @@ index edb74cccb..07085910c 100644
          }
  
          let mut background_color = Color::WHITE;
-@@ -2058,7 +2528,7 @@ impl Player {
+@@ -2058,7 +2534,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -14302,7 +14368,7 @@ index edb74cccb..07085910c 100644
                  stage,
              };
  
-@@ -2296,7 +2766,7 @@ impl Player {
+@@ -2296,7 +2772,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -14311,7 +14377,7 @@ index edb74cccb..07085910c 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2355,6 +2825,42 @@ impl Player {
+@@ -2355,6 +2831,98 @@ impl Player {
          self.debug_ui.borrow_mut()
      }
  
@@ -14351,10 +14417,66 @@ index edb74cccb..07085910c 100644
 +        sounds
 +    }
 +
++    /// FlashNX: steps the collector beyond its debt until this host frame has
++    /// spent `budget_us` in it, or until the cycle in progress ends (see
++    /// `bitmapdata_assist_budget_us`). Each step is a small artificial debt
++    /// paid by `collect_debt`, so the cycle advances incrementally, finalized
++    /// as usual, and a frame overshoots its budget by one step at most.
++    fn assist_collect(&mut self, budget_us: u64, gc_t0: Instant) -> Vec<SoundHandle> {
++        use crate::bitmap::bitmap_data::bitmapdata_live_bytes;
++        use gc_arena::arena::CollectionPhase;
++        // ~0.2 ms of collection on the Switch: a SMBC cycle is ~61 MB of
++        // debt at the default pacing for ~0.7 s.
++        const STEP: usize = 16 * 1024;
++        // Earlier `update`s of this host frame count against the budget.
++        let spent_before = FLASHNX_GC_US.load(Ordering::Relaxed);
++        let t0 = Instant::now();
++        if FLASHNX_ASSIST_UPDATES.load(Ordering::Relaxed) == 0 {
++            FLASHNX_ASSIST_FROM.store(bitmapdata_live_bytes(), Ordering::Relaxed);
++        }
++        let mut sounds = Vec::new();
++        let mut cycle_ended = false;
++        while spent_before + (gc_t0.elapsed().as_micros() as u64) < budget_us {
++            let phase = self.gc_arena.borrow().collection_phase();
++            {
++                let arena = self.gc_arena.borrow();
++                let metrics = arena.metrics();
++                // A sleeping collector owes nothing until the allocation it is
++                // still allowed is covered: artificial debt pays for that
++                // first, so add steps until some is owed. Bounded, because an
++                // arena without a `Gc` never owes anything.
++                let mut steps = 0u32;
++                loop {
++                    metrics.add_debt(STEP);
++                    steps += 1;
++                    if metrics.allocation_debt() > 0.0 || steps >= 1 << 16 {
++                        break;
++                    }
++                }
++                if !(metrics.allocation_debt() > 0.0) {
++                    break;
++                }
++            }
++            sounds.extend(self.collect_debt());
++            if phase != CollectionPhase::Sleeping
++                && self.gc_arena.borrow().collection_phase() == CollectionPhase::Sleeping
++            {
++                cycle_ended = true;
++                break;
++            }
++        }
++        FLASHNX_ASSIST_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
++        FLASHNX_ASSIST_UPDATES.fetch_add(1, Ordering::Relaxed);
++        if cycle_ended {
++            assisted_cycle_ended();
++        }
++        sounds
++    }
++
      /// Update the current state of the player.
      ///
      /// The given function will be called with the current stage root, current
-@@ -2382,7 +2888,95 @@ impl Player {
+@@ -2382,7 +2950,126 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -14377,19 +14499,23 @@ index edb74cccb..07085910c 100644
 +            let before = crate::bitmap::bitmap_data::bitmapdata_live_bytes();
 +            dropped_sounds = self.collect_full();
 +            crate::bitmap::bitmap_data::bitmapdata_note_full_gc();
++            // The help given to the cycle it ended, if any: it came too late.
++            let helped_us = take_assist_us();
 +            // Said when it costs: a full cycle on a big heap is a visible stall.
 +            if gc_t0.elapsed().as_millis() >= 200 {
 +                tracing::info!(
-+                    "BitmapData pressure: full collection in {} ms, bitmaps {} -> {} MB",
++                    "BitmapData pressure: full collection in {} ms, bitmaps {} -> {} MB, helped {} ms before",
 +                    gc_t0.elapsed().as_millis(),
 +                    before / (1024 * 1024),
-+                    crate::bitmap::bitmap_data::bitmapdata_live_bytes() / (1024 * 1024)
++                    crate::bitmap::bitmap_data::bitmapdata_live_bytes() / (1024 * 1024),
++                    helped_us / 1000
 +                );
 +            }
 +        } else if full_gc_requested {
 +            let before = self.gc_arena.borrow().metrics().total_allocation();
 +            dropped_sounds = self.collect_full();
 +            crate::bitmap::bitmap_data::bitmapdata_note_full_gc();
++            take_assist_us();
 +            let after = self.gc_arena.borrow().metrics().total_allocation();
 +            tracing::info!(
 +                "System.gc(): full collection in {} ms, {} -> {} MB",
@@ -14406,7 +14532,18 @@ index edb74cccb..07085910c 100644
 +            // late Classic levels, on a heap that dies at 3.0 GB. Here it is
 +            // ~0.6 of it, for ~1.6x the collector's time, only on such heaps.
 +            // Small heaps go the other way (`gc_pacing`).
-+            {
++            //
++            // Only between cycles. gc-arena prices ALL the work of the cycle
++            // in progress with the current factors, so switching them mid-cycle
++            // moves the debt at once: crossing 256 MB up (0.7x) owed ~36 MB more
++            // and Super Mario Bros. Crossover swept 72 MB in one 353 ms frame,
++            // crossing back down left the collector idle for 120 frames
++            // (2026-10-23, three such spikes in 3.5 minutes, all at 255 MB).
++            // Asleep, the cycle has done no work yet, so nothing is repriced.
++            use gc_arena::arena::CollectionPhase;
++            let was_sleeping =
++                self.gc_arena.borrow().collection_phase() == CollectionPhase::Sleeping;
++            if was_sleeping {
 +                let arena = self.gc_arena.borrow();
 +                let metrics = arena.metrics();
 +                metrics.set_pacing(gc_pacing(
@@ -14414,7 +14551,23 @@ index edb74cccb..07085910c 100644
 +                    FLASHNX_GC_LIVE.load(Ordering::Relaxed) as usize,
 +                ));
 +            }
-+            dropped_sounds = self.collect_debt();
++            let mut sounds = self.collect_debt();
++            // FlashNX: dead bitmaps piling up faster than the cycle ends get
++            // the collector some time (`bitmapdata_assist_budget_us`), unless
++            // the cycle just ended on its own: then its base is noted first.
++            if crate::bitmap::bitmap_data::bitmapdata_gc_assist() {
++                if !was_sleeping
++                    && self.gc_arena.borrow().collection_phase() == CollectionPhase::Sleeping
++                {
++                    assisted_cycle_ended();
++                } else {
++                    let budget_us = crate::bitmap::bitmap_data::bitmapdata_assist_budget_us();
++                    if budget_us > 0 {
++                        sounds.extend(self.assist_collect(budget_us, gc_t0));
++                    }
++                }
++            }
++            dropped_sounds = sounds;
 +        }
 +        for sound in dropped_sounds {
 +            self.audio.unregister_sound(sound);
@@ -14451,7 +14604,7 @@ index edb74cccb..07085910c 100644
  
          rval
      }
-@@ -2956,6 +3550,9 @@ impl PlayerBuilder {
+@@ -2956,6 +3643,9 @@ impl PlayerBuilder {
      pub fn build(self) -> Arc<Mutex<Player>> {
          use crate::backend::*;
          use ruffle_video::null;
@@ -14461,7 +14614,7 @@ index edb74cccb..07085910c 100644
          let audio = self
              .audio
              .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
-@@ -3173,6 +3770,36 @@ pub struct DragObject<'gc> {
+@@ -3173,6 +3863,61 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  
@@ -14469,6 +14622,31 @@ index edb74cccb..07085910c 100644
 +/// passes, marking again after each pass that resurrected a library, until
 +/// one does not (that one drops the unused libraries). Must run before every
 +/// sweep. Returns the sounds of the libraries dropped.
++/// FlashNX: an incremental cycle just ended, with the BitmapData assist on:
++/// note what bitmaps hold now as the base of the next growth, and say what
++/// the help cost if the cycle got any.
++fn assisted_cycle_ended() {
++    use crate::bitmap::bitmap_data::{bitmapdata_live_bytes, bitmapdata_note_full_gc};
++    bitmapdata_note_full_gc();
++    let updates = FLASHNX_ASSIST_UPDATES.load(Ordering::Relaxed);
++    let us = take_assist_us();
++    if updates > 0 {
++        tracing::info!(
++            "BitmapData pressure: cycle helped to its end, {} ms over {} updates, bitmaps {} -> {} MB",
++            us / 1000,
++            updates,
++            FLASHNX_ASSIST_FROM.load(Ordering::Relaxed) / (1024 * 1024),
++            bitmapdata_live_bytes() / (1024 * 1024)
++        );
++    }
++}
++
++/// FlashNX: a cycle ended: the collector help it got, which starts over.
++fn take_assist_us() -> u64 {
++    FLASHNX_ASSIST_UPDATES.store(0, Ordering::Relaxed);
++    FLASHNX_ASSIST_US.swap(0, Ordering::Relaxed)
++}
++
 +fn finalize_released_libraries(arena: &mut GcArena) -> Vec<SoundHandle> {
 +    let mut sounds = Vec::new();
 +    loop {

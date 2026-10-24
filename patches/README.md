@@ -501,6 +501,40 @@ grew by 32 MB since the last full collection or since their lowest point
 200 ms says so in the log. SMBC: 60 fps, with a full collection of ~1 s every
 40-60 s, each freeing ~30 MB of bitmaps it dropped.
 
+**Same files: the collector gets time between frames when dead bitmaps pile
+up, and the pacing only changes between cycles (FlashNX #136).**
+
+Those full collections were SMBC's stalls: 5 of 0.5-0.86 s in 3.3 minutes of
+play. The sampling profile of one (`--require collect_full`): 73 % sweeping
+(walking every object, freeing ~600 000 dead blocks), 25 % marking. gc-arena's
+debt only grows with the bytes of GC objects allocated, pixels are not one, and
+SMBC allocates few objects: its cycle crawled at ~0.1 ms a frame and never
+ended before the bitmaps grew by 32 MB. Flash Player counted the pixels as
+allocation work for its incremental collector (MMgc `SignalDependentAllocation`);
+gc-arena removed its own external allocation as too hard to pace (gc-arena #139,
+June 2026), hence a time budget instead of a debt per pixel byte.
+
+- `bitmapdata_assist_budget_us`: past 12 MB of growth since the last cycle (and
+  half the budget, as before), the collector gets 0.5 ms per host frame, rising
+  to 4 ms at 32 MB, where the full collection stays as the safety net.
+  `Player::assist_collect` adds 16 KB of artificial debt at a time and pays it
+  with `collect_debt` (so finalization is unchanged) until the frame's GC time
+  reaches the budget or the cycle ends; a sleeping collector is woken by adding
+  steps until some debt is owed. Every cycle end notes the base. Log:
+  `cycle helped to its end, X ms over N updates, bitmaps A -> B MB`, and the
+  full collection says how much help came before it. `gcassist.off` marker.
+- `gc_pacing` is applied only while the collector sleeps. gc-arena prices all
+  the work of the cycle in progress with the current factors, so switching to
+  `GC_TIGHT_PACING` (0.7x) when the arena crossed 256 MB mid-cycle added ~36 MB
+  of debt at once (SMBC swept 72 MB in a 353 ms frame), and switching back left
+  the collector idle for ~120 frames. The full collections used to keep SMBC's
+  arena under 256 MB, which hid it; any game around that size (SSF2) had it.
+
+SMBC on hardware, 4 minutes alternating its NES and SNES music: no GC pause
+over 80 ms during play. What is left (two full collections, two pauses of
+0.12-0.27 s) falls in loading frames that already took 0.6-1.1 s: bitmaps that
+jump by 24-35 MB at once (level start, NES/SNES switch) pass 32 MB in one go.
+
 **`core/src/avm2/globals/flash/media/sound.rs`, `avm2/object/sound_object.rs`,
 `backend/audio.rs`, `backend/audio/mixer.rs`, `context.rs`: `SampleDataEvent`
 (backport of upstream PR ruffle#24762, closed unmerged).**
