@@ -535,6 +535,34 @@ over 80 ms during play. What is left (two full collections, two pauses of
 0.12-0.27 s) falls in loading frames that already took 0.6-1.1 s: bitmaps that
 jump by 24-35 MB at once (level start, NES/SNES switch) pass 32 MB in one go.
 
+**`core/src/avm2/flashnx_gme.rs`, `class.rs`, `method.rs`, `traits.rs`:
+CrossBridge's libgme runs natively (FlashNX #136).**
+
+Super Mario Bros. Crossover makes its music and records its sound effects with
+game-music-emu compiled to ActionScript by CrossBridge (Adobe's `sample.libgme`),
+driven through one facade class, `libgme`, whose static methods each call the
+compiled C. With the SNES music, each `sampleData` handler emulated 186 ms of
+sound in ~60 ms at 1785 MHz: a frame of 60-70 ms every ~11 frames, 53 fps
+median. FlashNX links game-music-emu 0.6.5 (`cpp/third_party/gme`, LGPL) and
+registers its C API (`set_api`, from `rust/src/gme.rs`). `Class::load_abc_traits`
+hands every class's traits to `native_traits`, which only touches the static
+side of a public `libgme` with a `gme_new_emu`: each method that takes or makes
+an emulator becomes `Method::flashnx_native_twin` (`MethodKind::Native` with the
+same ABC signature, so arguments are coerced as declared), through
+`Trait::flashnx_with_method`. The `int` the game holds is a handle into a native
+table, never a domain-memory pointer, so every facade method taking one is
+replaced, the few that need CrossBridge's allocator or file system with a neutral
+answer. Data still crosses domain memory: `gme_load_data` reads the file the game
+copied there, `gme_play_float` (the game's addition: `Music_Emu::play`, then each
+sample times 1/32768 as an f32) writes where the compiled wrapper wrote.
+`gmenative.off` marker; `gme: native play` line every 256 calls.
+
+On hardware: 38 facade functions replaced, a 186 ms pass of music costs 0.6-0.7 ms
+with the NES emulator and 2-4 ms with the SNES one; SNES level 1 at 60 fps median
+(53 before) with no periodic stall, the loading screen that records the sound
+effects ~16 -> ~8 s. Jonathan: the music sounds the same, except perhaps the first
+tick of the end-of-level timer, a little louder.
+
 **`core/src/avm2/globals/flash/media/sound.rs`, `avm2/object/sound_object.rs`,
 `backend/audio.rs`, `backend/audio/mixer.rs`, `context.rs`: `SampleDataEvent`
 (backport of upstream PR ruffle#24762, closed unmerged).**

@@ -1550,10 +1550,18 @@ index 6cfdf6706..806c24b97 100644
  
              (display_object.path(), display_object.object1()?)
 diff --git a/core/src/avm2.rs b/core/src/avm2.rs
-index 563ffbb03..ba6970ad5 100644
+index 563ffbb03..037b6c0c9 100644
 --- a/core/src/avm2.rs
 +++ b/core/src/avm2.rs
-@@ -373,6 +373,11 @@ impl<'gc> Avm2<'gc> {
+@@ -54,6 +54,7 @@ pub mod error;
+ mod events;
+ mod filters;
+ mod flv;
++pub mod flashnx_gme;
+ mod function;
+ pub mod globals;
+ mod metadata;
+@@ -373,6 +374,11 @@ impl<'gc> Avm2<'gc> {
      ///
      /// Attempts to register the same listener for the same event will also do
      /// nothing.
@@ -6214,7 +6222,7 @@ index 7fc6b14d6..ba04c9087 100644
  
      #[inline]
 diff --git a/core/src/avm2/class.rs b/core/src/avm2/class.rs
-index 27daaf6bc..340265324 100644
+index 27daaf6bc..7a6967837 100644
 --- a/core/src/avm2/class.rs
 +++ b/core/src/avm2/class.rs
 @@ -241,6 +241,11 @@ impl<'gc> ClassData<'gc> {
@@ -6229,7 +6237,21 @@ index 27daaf6bc..340265324 100644
      pub fn as_ptr(self) -> *const () {
          Gc::as_ptr(self.0).cast()
      }
-@@ -999,6 +1004,12 @@ impl<'gc> Class<'gc> {
+@@ -598,10 +603,12 @@ impl<'gc> Class<'gc> {
+             return Ok(());
+         }
+ 
+-        let traits = traits
++        let mut traits: Box<[Trait<'gc>]> = traits
+             .iter()
+             .map(|abc_traits| Trait::from_abc_trait(unit, abc_traits, activation))
+             .collect::<Result<_, _>>()?;
++        // FlashNX: CrossBridge's libgme facade runs natively (flashnx_gme).
++        crate::avm2::flashnx_gme::native_traits(self, activation, &mut traits);
+         let write = Gc::write(activation.gc(), self.0);
+         let _ = unlock!(write, ClassData, traits).set(traits);
+         Ok(())
+@@ -999,6 +1006,12 @@ impl<'gc> Class<'gc> {
          *self.0.vtable.get().expect("VTable not yet initialized!")
      }
  
@@ -6497,6 +6519,558 @@ index 6a0c92a11..d0777428a 100644
              prop.enumerable = enumerable;
          }
      }
+diff --git a/core/src/avm2/flashnx_gme.rs b/core/src/avm2/flashnx_gme.rs
+new file mode 100644
+index 000000000..a545c05c0
+--- /dev/null
++++ b/core/src/avm2/flashnx_gme.rs
+@@ -0,0 +1,546 @@
++//! FlashNX: game-music-emu run natively in place of its CrossBridge build.
++//!
++//! Super Mario Bros. Crossover plays its music and records its sound effects
++//! with libgme compiled to ActionScript by CrossBridge (FlasCC): Adobe's
++//! `sample.libgme` example, driven through one facade class, `libgme`, whose
++//! static methods each call the compiled C. Emulating the SNES sound chip that
++//! way costs ~60 ms for every 186 ms of music on the Switch at 1785 MHz, in a
++//! single `sampleData` handler, so the game stalls every ~11 frames and runs at
++//! 0.6-0.9x speed with its SNES music. Natively, the same library plays an SPC
++//! at ~7 % of a 400 MHz Mac (blargg's snes_spc README).
++//!
++//! FlashNX links game-music-emu 0.6.5 (cpp/third_party/gme) and registers its
++//! C API here (`set_api`). When a class named `libgme` with a static
++//! `gme_new_emu` is loaded, its static methods that take or make an emulator are
++//! replaced by the natives below, keeping their ABC signatures (arguments are
++//! coerced as declared). The emulators live outside the movie's memory: the
++//! `int` the game holds is a handle into `EMUS`, never a pointer into domain
++//! memory, so every facade method that takes one is replaced, the ones FlashNX
++//! cannot honour by a neutral answer. Data still travels through domain memory
++//! (`gme_load_data` reads the file the game copied there, `gme_play_float`
++//! writes the samples where the compiled code wrote them).
++
++use super::activation::Activation;
++use super::class::Class;
++use super::method::{Method, NativeMethodImpl};
++use super::parameters::ParametersExt;
++use super::traits::{Trait, TraitKind};
++use crate::avm2::{Error, Value};
++use crate::string::AvmString;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::{Mutex, OnceLock};
++
++/// The emulator types the facade's getters name (`gme_spc_type`...). The game
++/// only passes them back to `gme_new_emu`, so small numbers stand in for the C
++/// pointers.
++pub const KIND_GBS: u8 = 1;
++pub const KIND_KSS: u8 = 2;
++pub const KIND_NSF: u8 = 3;
++pub const KIND_NSFE: u8 = 4;
++pub const KIND_SAP: u8 = 5;
++pub const KIND_SPC: u8 = 6;
++
++/// libgme's C API, as FlashNX calls it (rust/src/gme.rs). An emulator is the
++/// address of its `Music_Emu`; errors are libgme's `gme_err_t` strings.
++#[derive(Clone, Copy)]
++pub struct GmeApi {
++    pub new_emu: fn(kind: u8, sample_rate: i32) -> usize,
++    pub open_data: fn(data: &[u8], sample_rate: i32) -> Result<(usize, u8), String>,
++    pub delete: fn(emu: usize),
++    pub load_data: fn(emu: usize, data: &[u8]) -> Option<String>,
++    pub start_track: fn(emu: usize, track: i32) -> Option<String>,
++    pub play: fn(emu: usize, out: &mut [i16]) -> Option<String>,
++    pub track_ended: fn(emu: usize) -> bool,
++    pub tell: fn(emu: usize) -> i32,
++    pub seek: fn(emu: usize, msec: i32) -> Option<String>,
++    pub set_tempo: fn(emu: usize, tempo: f64),
++    pub set_fade: fn(emu: usize, start_msec: i32),
++    pub set_stereo_depth: fn(emu: usize, depth: f64),
++    pub track_count: fn(emu: usize) -> i32,
++    pub track_info: fn(emu: usize, track: i32) -> Option<String>,
++    pub ignore_silence: fn(emu: usize, ignore: bool),
++    pub voice_count: fn(emu: usize) -> i32,
++    pub mute_voice: fn(emu: usize, index: i32, mute: bool),
++    pub mute_voices: fn(emu: usize, mask: i32),
++    pub warning: fn(emu: usize) -> Option<String>,
++}
++
++static API: OnceLock<GmeApi> = OnceLock::new();
++
++/// On (default) or off (`gmenative.off` marker): off, the CrossBridge build
++/// runs as before.
++static ENABLED: AtomicBool = AtomicBool::new(true);
++
++/// FlashNX gives the API once, at start-up.
++pub fn set_api(api: GmeApi) {
++    let _ = API.set(api);
++}
++
++pub fn set_enabled(enabled: bool) {
++    ENABLED.store(enabled, Ordering::Relaxed);
++}
++
++fn api() -> Option<&'static GmeApi> {
++    if ENABLED.load(Ordering::Relaxed) {
++        API.get()
++    } else {
++        None
++    }
++}
++
++/// Handles start here, far from anything the game could mistake for one of
++/// its own small numbers ("NX" in the high bytes).
++const HANDLE_BASE: i32 = 0x4E58_0000;
++
++/// Live emulators: (address, kind) by handle, `None` once deleted.
++static EMUS: Mutex<Vec<Option<(usize, u8)>>> = Mutex::new(Vec::new());
++
++fn add_emu(emu: usize, kind: u8) -> i32 {
++    let mut emus = EMUS.lock().unwrap();
++    emus.push(Some((emu, kind)));
++    HANDLE_BASE + (emus.len() as i32 - 1)
++}
++
++fn emu_of(handle: i32) -> Option<(usize, u8)> {
++    let index = handle.checked_sub(HANDLE_BASE)?;
++    let emus = EMUS.lock().unwrap();
++    let found = emus.get(usize::try_from(index).ok()?).copied().flatten();
++    if found.is_none() {
++        static SAID: AtomicBool = AtomicBool::new(false);
++        if !SAID.swap(true, Ordering::Relaxed) {
++            tracing::warn!("gme: handle {handle:#x} is not a native emulator, ignored");
++        }
++    }
++    found
++}
++
++/// FlashNX: the game ended (`ruffle_shutdown`): every emulator it left goes.
++pub fn reset() {
++    let emus = std::mem::take(&mut *EMUS.lock().unwrap());
++    if let Some(api) = API.get() {
++        for (emu, _) in emus.into_iter().flatten() {
++            (api.delete)(emu);
++        }
++    }
++}
++
++/// Samples made and the time it took, said every `PLAY_REPORT` calls.
++static PLAY_CALLS: AtomicU64 = AtomicU64::new(0);
++static PLAY_SAMPLES: AtomicU64 = AtomicU64::new(0);
++static PLAY_US: AtomicU64 = AtomicU64::new(0);
++const PLAY_REPORT: u64 = 256;
++
++fn note_play(samples: usize, started: std::time::Instant) {
++    PLAY_SAMPLES.fetch_add(samples as u64, Ordering::Relaxed);
++    PLAY_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
++    if PLAY_CALLS.fetch_add(1, Ordering::Relaxed) + 1 == PLAY_REPORT {
++        let samples = PLAY_SAMPLES.swap(0, Ordering::Relaxed);
++        let us = PLAY_US.swap(0, Ordering::Relaxed);
++        PLAY_CALLS.store(0, Ordering::Relaxed);
++        tracing::info!(
++            "gme: native play, {PLAY_REPORT} calls, {} samples, {} us a call",
++            samples,
++            us / PLAY_REPORT
++        );
++    }
++}
++
++fn error_value<'gc>(activation: &mut Activation<'_, 'gc>, error: Option<String>) -> Value<'gc> {
++    match error {
++        Some(error) => AvmString::new_utf8(activation.gc(), error).into(),
++        None => Value::Null,
++    }
++}
++
++/// Domain memory of the calling movie: CrossBridge's `CModule.ram`.
++fn read_memory<'gc>(
++    activation: &mut Activation<'_, 'gc>,
++    ptr: i32,
++    len: i32,
++) -> Result<Vec<u8>, String> {
++    let domain = activation.caller_domain().ok_or("FlashNX gme: no caller domain")?;
++    let memory = domain.domain_memory();
++    let storage = memory.storage();
++    let bytes = storage.bytes();
++    let start = usize::try_from(ptr).map_err(|_| "FlashNX gme: bad pointer")?;
++    let len = usize::try_from(len).map_err(|_| "FlashNX gme: bad length")?;
++    let end = start.checked_add(len).ok_or("FlashNX gme: bad length")?;
++    bytes
++        .get(start..end)
++        .map(|b| b.to_vec())
++        .ok_or_else(|| "FlashNX gme: read past domain memory".to_string())
++}
++
++/// Plays `count` samples into domain memory: as 16-bit samples at `out`,
++/// and, with `out_float`, as floats there too (`gme_play_float`, Super Mario
++/// Bros. Crossover's addition to libgme: each sample times 1/32768).
++fn play_into<'gc>(
++    activation: &mut Activation<'_, 'gc>,
++    api: &GmeApi,
++    emu: usize,
++    count: i32,
++    out: i32,
++    out_float: Option<i32>,
++) -> Result<Option<String>, String> {
++    let started = std::time::Instant::now();
++    let count = usize::try_from(count).unwrap_or(0);
++    let mut samples = vec![0i16; count];
++    let error = (api.play)(emu, &mut samples);
++
++    let domain = activation.caller_domain().ok_or("FlashNX gme: no caller domain")?;
++    let memory = domain.domain_memory();
++    let mut storage = memory.storage_mut();
++    let bytes = storage.bytes_mut();
++    let short_at = usize::try_from(out).map_err(|_| "FlashNX gme: bad pointer")?;
++    let shorts = bytes
++        .get_mut(short_at..short_at + count * 2)
++        .ok_or("FlashNX gme: write past domain memory")?;
++    for (chunk, sample) in shorts.chunks_exact_mut(2).zip(&samples) {
++        chunk.copy_from_slice(&sample.to_le_bytes());
++    }
++    if let Some(out_float) = out_float {
++        let float_at = usize::try_from(out_float).map_err(|_| "FlashNX gme: bad pointer")?;
++        let floats = bytes
++            .get_mut(float_at..float_at + count * 4)
++            .ok_or("FlashNX gme: write past domain memory")?;
++        for (chunk, sample) in floats.chunks_exact_mut(4).zip(&samples) {
++            // Exact: a 16-bit sample over a power of two fits an f32.
++            let value = (*sample as f64 * 0.000030517578125) as f32;
++            chunk.copy_from_slice(&value.to_le_bytes());
++        }
++    }
++    note_play(count, started);
++    Ok(error)
++}
++
++macro_rules! with_emu {
++    ($args:ident, $fallback:expr, |$api:ident, $emu:ident, $kind:ident| $body:expr) => {{
++        let Some($api) = api() else { return Ok($fallback) };
++        let Some(($emu, $kind)) = emu_of($args.get_i32(0)) else { return Ok($fallback) };
++        let _ = $kind;
++        $body
++    }};
++}
++
++fn kind_getter<'gc>(kind: u8) -> Value<'gc> {
++    Value::Integer(kind as i32)
++}
++
++fn gme_gbs_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_GBS))
++}
++fn gme_kss_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_KSS))
++}
++fn gme_nsf_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_NSF))
++}
++fn gme_nsfe_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_NSFE))
++}
++fn gme_sap_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_SAP))
++}
++fn gme_spc_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(kind_getter(KIND_SPC))
++}
++
++/// `gme_new_emu(type, sample_rate)`: 0 when the type is not one of ours, as
++/// libgme answers NULL.
++fn gme_new_emu<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    let Some(api) = api() else { return Ok(Value::Integer(0)) };
++    let kind = args.get_i32(0);
++    if !(KIND_GBS as i32..=KIND_SPC as i32).contains(&kind) {
++        return Ok(Value::Integer(0));
++    }
++    let emu = (api.new_emu)(kind as u8, args.get_i32(1));
++    if emu == 0 {
++        return Ok(Value::Integer(0));
++    }
++    tracing::info!("gme: native emulator, type {kind}");
++    Ok(Value::Integer(add_emu(emu, kind as u8)))
++}
++
++/// `gme_open_data(data, size, out, sample_rate)`: the handle is written where
++/// libgme would have written the `Music_Emu*`.
++fn gme_open_data<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    let Some(api) = api() else { return Ok(Value::Null) };
++    let result = read_memory(activation, args.get_i32(0), args.get_i32(1))
++        .and_then(|data| (api.open_data)(&data, args.get_i32(3)));
++    let error = match result {
++        Ok((emu, kind)) => {
++            let handle = add_emu(emu, kind);
++            let domain = activation.caller_domain();
++            let at = usize::try_from(args.get_i32(2)).ok();
++            match (domain, at) {
++                (Some(domain), Some(at)) => {
++                    let memory = domain.domain_memory();
++                    let mut storage = memory.storage_mut();
++                    match storage.bytes_mut().get_mut(at..at + 4) {
++                        Some(out) => {
++                            out.copy_from_slice(&handle.to_le_bytes());
++                            None
++                        }
++                        None => Some("FlashNX gme: write past domain memory".to_string()),
++                    }
++                }
++                _ => Some("FlashNX gme: bad pointer".to_string()),
++            }
++        }
++        Err(error) => Some(error),
++    };
++    Ok(error_value(activation, error))
++}
++
++fn gme_delete<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    let Some(api) = api() else { return Ok(Value::Undefined) };
++    let handle = args.get_i32(0);
++    let taken = handle.checked_sub(HANDLE_BASE).and_then(|index| {
++        let mut emus = EMUS.lock().unwrap();
++        emus.get_mut(usize::try_from(index).ok()?)?.take()
++    });
++    if let Some((emu, _)) = taken {
++        (api.delete)(emu);
++    }
++    Ok(Value::Undefined)
++}
++
++fn gme_load_data<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let error = match read_memory(activation, args.get_i32(1), args.get_i32(2)) {
++            Ok(data) => (api.load_data)(emu, &data),
++            Err(error) => Some(error),
++        };
++        Ok(error_value(activation, error))
++    })
++}
++
++fn gme_start_track<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let error = (api.start_track)(emu, args.get_i32(1));
++        Ok(error_value(activation, error))
++    })
++}
++
++/// `gme_play(emu, count, out)`.
++fn gme_play<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let error = play_into(activation, api, emu, args.get_i32(1), args.get_i32(2), None)
++            .unwrap_or_else(Some);
++        Ok(error_value(activation, error))
++    })
++}
++
++/// `gme_play_float(emu, count, out, out_float)`: the compiled wrapper ignores
++/// `Music_Emu::play`'s error and always answers null.
++fn gme_play_float<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let result = play_into(
++            activation,
++            api,
++            emu,
++            args.get_i32(1),
++            args.get_i32(2),
++            Some(args.get_i32(3)),
++        );
++        Ok(match result {
++            Ok(_) => Value::Null,
++            Err(error) => error_value(activation, Some(error)),
++        })
++    })
++}
++
++fn gme_track_ended<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Integer(1), |api, emu, kind| {
++        Ok(Value::Integer((api.track_ended)(emu) as i32))
++    })
++}
++
++fn gme_tell<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Integer(0), |api, emu, kind| {
++        Ok(Value::Integer((api.tell)(emu)))
++    })
++}
++
++fn gme_seek<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let error = (api.seek)(emu, args.get_i32(1));
++        Ok(error_value(activation, error))
++    })
++}
++
++fn gme_set_tempo<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.set_tempo)(emu, args.get_f64(1));
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_set_fade<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.set_fade)(emu, args.get_i32(1));
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_set_stereo_depth<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.set_stereo_depth)(emu, args.get_f64(1));
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_track_count<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Integer(0), |api, emu, kind| {
++        Ok(Value::Integer((api.track_count)(emu)))
++    })
++}
++
++/// `gme_track_info(emu, out, track)`: the info is not written to domain
++/// memory (it would need CrossBridge's allocator); only the error comes back.
++/// Super Mario Bros. Crossover passes 0 for `out` and never reads it.
++fn gme_track_info<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let error = (api.track_info)(emu, args.get_i32(2));
++        Ok(error_value(activation, error))
++    })
++}
++
++fn gme_ignore_silence<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.ignore_silence)(emu, args.get_i32(1) != 0);
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_voice_count<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Integer(0), |api, emu, kind| {
++        Ok(Value::Integer((api.voice_count)(emu)))
++    })
++}
++
++fn gme_mute_voice<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.mute_voice)(emu, args.get_i32(1), args.get_i32(2) != 0);
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_mute_voices<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Undefined, |api, emu, kind| {
++        (api.mute_voices)(emu, args.get_i32(1));
++        Ok(Value::Undefined)
++    })
++}
++
++fn gme_warning<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Null, |api, emu, kind| {
++        let warning = (api.warning)(emu);
++        Ok(error_value(activation, warning))
++    })
++}
++
++/// `gme_type(emu)`: the same stand-in as the getters.
++fn gme_type<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    with_emu!(args, Value::Integer(0), |api, emu, kind| {
++        let _ = (api, emu);
++        Ok(Value::Integer(kind as i32))
++    })
++}
++
++/// The facade methods that take an emulator but need CrossBridge's memory or
++/// file system (names of voices, equalizer, user data, files and playlists):
++/// a neutral answer, said once, rather than a handle read as a pointer.
++fn unsupported<'gc>(activation: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    static SAID: AtomicBool = AtomicBool::new(false);
++    if !SAID.swap(true, Ordering::Relaxed) {
++        tracing::warn!("gme: a libgme call FlashNX does not run natively was answered empty");
++    }
++    Ok(error_value(activation, Some("FlashNX: not supported by the native libgme".to_string())))
++}
++
++fn unsupported_int<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(Value::Integer(0))
++}
++
++fn unsupported_void<'gc>(_: &mut Activation<'_, 'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error<'gc>> {
++    Ok(Value::Undefined)
++}
++
++fn native_for(name: &str) -> Option<NativeMethodImpl> {
++    Some(match name {
++        "gme_gbs_type" => gme_gbs_type,
++        "gme_kss_type" => gme_kss_type,
++        "gme_nsf_type" => gme_nsf_type,
++        "gme_nsfe_type" => gme_nsfe_type,
++        "gme_sap_type" => gme_sap_type,
++        "gme_spc_type" => gme_spc_type,
++        "gme_new_emu" => gme_new_emu,
++        "gme_open_data" => gme_open_data,
++        "gme_delete" => gme_delete,
++        "gme_load_data" => gme_load_data,
++        "gme_start_track" => gme_start_track,
++        "gme_play" => gme_play,
++        "gme_play_float" => gme_play_float,
++        "gme_track_ended" => gme_track_ended,
++        "gme_tell" => gme_tell,
++        "gme_seek" => gme_seek,
++        "gme_set_tempo" => gme_set_tempo,
++        "gme_set_fade" => gme_set_fade,
++        "gme_set_stereo_depth" => gme_set_stereo_depth,
++        "gme_track_count" => gme_track_count,
++        "gme_track_info" => gme_track_info,
++        "gme_ignore_silence" => gme_ignore_silence,
++        "gme_voice_count" => gme_voice_count,
++        "gme_mute_voice" => gme_mute_voice,
++        "gme_mute_voices" => gme_mute_voices,
++        "gme_warning" => gme_warning,
++        "gme_type" => gme_type,
++        "gme_open_file" | "gme_load_file" | "gme_load_m3u" | "gme_load_m3u_data"
++        | "gme_load_custom" => unsupported,
++        "gme_voice_names" | "gme_user_data" => unsupported_int,
++        "gme_equalizer" | "gme_set_equalizer" | "gme_set_user_data" | "gme_set_user_cleanup" => {
++            unsupported_void
++        }
++        _ => return None,
++    })
++}
++
++/// FlashNX: called with the traits of every class as it loads
++/// (`Class::load_abc_traits`). Only the static side of a public `libgme` that
++/// has a `gme_new_emu` is changed: CrossBridge's facade.
++pub fn native_traits<'gc>(
++    class: Class<'gc>,
++    activation: &mut Activation<'_, 'gc>,
++    traits: &mut [Trait<'gc>],
++) {
++    if api().is_none() || !class.is_c_class() {
++        return;
++    }
++    let name = class.name();
++    if !name.namespace().is_public() || name.local_name().to_utf8_lossy() != "libgme$" {
++        return;
++    }
++    if !traits
++        .iter()
++        .any(|t| t.name().local_name().to_utf8_lossy() == "gme_new_emu")
++    {
++        return;
++    }
++    let mc = activation.gc();
++    let mut replaced = 0;
++    for t in traits.iter_mut() {
++        let Some(native) = native_for(&t.name().local_name().to_utf8_lossy()) else {
++            continue;
++        };
++        let method: Method<'gc> = match t.kind() {
++            TraitKind::Method { method, .. } | TraitKind::Getter { method, .. } => *method,
++            _ => continue,
++        };
++        if let Some(twin) = t.flashnx_with_method(method.flashnx_native_twin(mc, native)) {
++            *t = twin;
++            replaced += 1;
++        }
++    }
++    tracing::info!("gme: libgme runs natively, {replaced} functions of its CrossBridge facade replaced");
++}
 diff --git a/core/src/avm2/function.rs b/core/src/avm2/function.rs
 index 27fc0f88c..9939aacca 100644
 --- a/core/src/avm2/function.rs
@@ -7139,9 +7713,18 @@ index 23ae3533b..81df1bfb8 100644
      }
  
 diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
-index dcbb88f37..14f084afb 100644
+index dcbb88f37..debe196cb 100644
 --- a/core/src/avm2/method.rs
 +++ b/core/src/avm2/method.rs
+@@ -11,7 +11,7 @@ use crate::string::AvmString;
+ use crate::tag_utils::SwfMovie;
+ use gc_arena::barrier::{Write, unlock};
+ use gc_arena::lock::OnceLock;
+-use gc_arena::{Collect, Gc};
++use gc_arena::{Collect, Gc, Mutation};
+ use std::borrow::Cow;
+ use std::rc::Rc;
+ use std::sync::Arc;
 @@ -136,6 +136,11 @@ struct MethodData<'gc> {
      /// This is true when the method is a free-standing function and none of the
      /// declared arguments have a type or a default value.
@@ -7171,7 +7754,7 @@ index dcbb88f37..14f084afb 100644
      /// Construct a `Method` from an `AbcFile` and method index.
      pub fn from_method_index(
          txunit: TranslationUnit<'gc>,
-@@ -220,6 +235,7 @@ impl<'gc> Method<'gc> {
+@@ -220,10 +235,38 @@ impl<'gc> Method<'gc> {
                  association: OnceLock::new(),
                  is_function,
                  is_unchecked: is_function && all_params_unchecked,
@@ -7179,6 +7762,37 @@ index dcbb88f37..14f084afb 100644
              },
          )))
      }
+ 
++    /// FlashNX: this method run by `native` instead of its bytecode, with the
++    /// same ABC signature, so its arguments are coerced as declared
++    /// (`flashnx_gme`).
++    pub fn flashnx_native_twin(self, mc: &Mutation<'gc>, native: NativeMethodImpl) -> Self {
++        let data = &self.0;
++        Self(Gc::new(
++            mc,
++            MethodData {
++                txunit: data.txunit,
++                abc: data.abc.clone(),
++                abc_method: data.abc_method,
++                abc_method_body: data.abc_method_body,
++                method_kind: MethodKind::Native {
++                    native_method: native,
++                    fast_call: false,
++                },
++                signature: data.signature.clone(),
++                return_type: data.return_type,
++                resolved_info: OnceLock::new(),
++                association: OnceLock::new(),
++                is_function: data.is_function,
++                is_unchecked: data.is_unchecked,
++                flashnx_jit: std::cell::Cell::new(0),
++            },
++        ))
++    }
++
+     /// Get the underlying ABC file.
+     pub fn abc(self) -> Rc<AbcFile> {
+         self.0.txunit.abc()
 diff --git a/core/src/avm2/object/array_object.rs b/core/src/avm2/object/array_object.rs
 index 852754058..ea218ca7e 100644
 --- a/core/src/avm2/object/array_object.rs
@@ -7810,6 +8424,33 @@ index 62ff9a7e9..b44604e72 100644
      #[inline(always)]
      pub fn value_at(&self, index: usize) -> Value<'gc> {
          self.data[index].get()
+diff --git a/core/src/avm2/traits.rs b/core/src/avm2/traits.rs
+index 6b426cd78..f4a25d1eb 100644
+--- a/core/src/avm2/traits.rs
++++ b/core/src/avm2/traits.rs
+@@ -212,6 +212,22 @@ impl<'gc> Trait<'gc> {
+         &self.kind
+     }
+ 
++    /// FlashNX: this method or getter trait with another method
++    /// (`flashnx_gme`), `None` for any other kind.
++    pub fn flashnx_with_method(&self, method: Method<'gc>) -> Option<Self> {
++        let kind = match self.kind {
++            TraitKind::Method { disp_id, .. } => TraitKind::Method { disp_id, method },
++            TraitKind::Getter { disp_id, .. } => TraitKind::Getter { disp_id, method },
++            _ => return None,
++        };
++        Some(Trait {
++            name: self.name,
++            attributes: self.attributes,
++            kind,
++            metadata: self.metadata.clone(),
++        })
++    }
++
+     pub fn metadata(&self) -> Option<Box<[Metadata<'gc>]>> {
+         self.metadata.clone()
+     }
 diff --git a/core/src/avm2/value.rs b/core/src/avm2/value.rs
 index 008863dec..561bffbe9 100644
 --- a/core/src/avm2/value.rs
@@ -13086,7 +13727,7 @@ index 91bdb52df..caf29d1b5 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..77d222823 100644
+index 6e5379213..2f677ca6d 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -13099,13 +13740,14 @@ index 6e5379213..77d222823 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,44 @@ extern crate num_derive;
+@@ -15,10 +18,45 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
 +/// FlashNX: per-game `Capabilities.playerType` override (Disney/Yamago shells
 +/// need opposite answers — see `avm2::globals::flash::system::capabilities`).
 +pub use avm2::globals::flash::system::capabilities::set_plugin_player_type;
++pub use avm2::flashnx_gme;
  mod avm_rng;
  mod binary_data;
  pub mod bitmap;
@@ -13144,7 +13786,7 @@ index 6e5379213..77d222823 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +63,10 @@ mod ecma_conversions;
+@@ -26,6 +64,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -13155,7 +13797,7 @@ index 6e5379213..77d222823 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +104,18 @@ pub use events::PlayerEvent;
+@@ -63,6 +105,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};

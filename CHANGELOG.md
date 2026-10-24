@@ -12,6 +12,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 - **Games start sooner**: one kind of image games embed (32-bit lossless) was converted pixel by pixel through a slow copy. Super Mario Bros. Crossover's 4 400 images: 2 seconds less.
 - **More ActionScript 3 runs as native code**: memory reads and writes, whole-number arithmetic and calls in code compiled from C or C++ for Flash (FlasCC, Alchemy, as in emulators and physics engines), and loops check the script time limit less often. Whole numbers that a game's code always holds are now worked on directly in the processor, without checking their type at every step: with its SNES music, Super Mario Bros. Crossover runs its scripts in under a third of the time it did.
+- **Music that a game emulates itself now runs natively** (#136). Super Mario Bros. Crossover emulates the sound chips of the NES, SNES, Game Boy and other consoles in ActionScript to play its music and record its sound effects. FlashNX now runs the same emulators, built for the Switch, in their place: with the SNES music the game no longer stutters every fifth of a second and its first level runs at 60 fps, and its loading screen is about twice as short.
 
 ### Fixed
 

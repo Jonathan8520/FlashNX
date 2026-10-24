@@ -21,8 +21,11 @@ BUILD       := build
 # src/sqlite_flashnx.c with its options (its read-only file system is
 # src/sqlite_vfs.c), so it is an include directory and not a source one. See its
 # README.md.
-SOURCES     := src third_party/libdrm_nouveau
-INCLUDES    := include third_party/libdrm_nouveau third_party/sqlite
+# third_party/gme: game-music-emu 0.6.5 (LGPL 2.1), the six emulators the
+# CrossBridge libgme of Super Mario Bros. Crossover uses, run in its place by
+# rust/src/gme.rs. See its README.md.
+SOURCES     := src third_party/libdrm_nouveau third_party/gme third_party/gme/ext
+INCLUDES    := include third_party/libdrm_nouveau third_party/sqlite third_party/gme
 
 # User-facing name = "FlashNX" (rebrand 2026-05-26, fully applied at v1.0.0).
 # The repo + Cargo lib name stay `flash-for-switch` (dev-facing, stable); every

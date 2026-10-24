@@ -906,6 +906,7 @@ mod clock_auto;
 pub(crate) mod heapprof;
 mod covers;
 mod favorites;
+mod gme;
 mod ffi;
 mod keymap;
 mod library;
@@ -1869,6 +1870,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     ruffle_core::bitmap::bitmap_data::set_bitmapdata_gc_assist(gc_assist);
     if !gc_assist {
         log(b"gc: gcassist.off present -> full collections only for dead bitmaps\n\0");
+    }
+    // `sdmc:/switch/FlashNX/gmenative.off`: a game's CrossBridge libgme runs as
+    // it ships, compiled to ActionScript (see gme.rs and `flashnx_gme` in our
+    // Ruffle).
+    let gme_native = !backend::render::marker_present("gmenative.off");
+    gme::install(gme_native);
+    if !gme_native {
+        log(b"gme: gmenative.off present -> CrossBridge libgme runs as ActionScript\n\0");
     }
     // `sdmc:/switch/FlashNX/fastcall.off`: upstream's AVM2 call path (an Arc
     // clone per call, the receiver check, the whole new frame cleared), see
@@ -5012,6 +5021,8 @@ pub extern "C" fn ruffle_shutdown() {
     // The level database a game's server ran on (Happy Wheels, #130), closed
     // with its game: a delete of the game must find it free.
     crate::backend::hwserver::close();
+    // The native music emulators the game left (gme.rs): its Player is gone.
+    ruffle_core::flashnx_gme::reset();
     // Before the SESSION END marker, so its summary line counts as the game's.
     crate::clock_auto::end_game();
     keymap::GYRO_MODE.store(keymap::GYRO_OFF, core::sync::atomic::Ordering::Relaxed);
