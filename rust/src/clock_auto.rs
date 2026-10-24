@@ -19,7 +19,11 @@
 //! threshold below is a measurement made in the running game, never a guess
 //! about it:
 //! - UP: the movie ran under 95 % of its nominal speed for two half-second
-//!   windows in a row.
+//!   windows in a row, or presented under 90 % of the display's vsyncs (its
+//!   speed held by catching up, the picture juddering: `UP_PACE`). Such a
+//!   raise for the vsyncs alone is kept only if they are held again, and
+//!   comes down only while they are; a raise for the speed is judged on the
+//!   speed, as before.
 //! - KEEP or REJECT: one window after the raise is skipped (the change itself),
 //!   the next two must show the speed at 97 % or more, or 15 % above what it
 //!   was. Otherwise the raise bought nothing: back down, and the next try waits
@@ -59,6 +63,19 @@ extern "C" {
 
 /// Under this fraction of its nominal speed, a window counts as behind.
 const UP_SPEED: f32 = 0.95;
+/// The display's refresh: the host loop presents one picture per vsync when
+/// every frame is on time.
+const DISPLAY_HZ: f64 = 60.0;
+/// Under this fraction of the display's vsyncs presented, a window counts as
+/// behind too, whatever the speed. A game can keep its speed by catching up
+/// (two ticks in one host frame) while missing vsyncs: Super Mario Bros.
+/// Crossover's level 2 at 1020 MHz held 1.0x at 50-55 pictures a second, ~25 ms
+/// of work for each 33 ms frame of a 30 fps movie, and Jonathan saw it judder
+/// (2026-10-24). Stricter than the speed's threshold: under 54 of 60.
+const UP_PACE: f32 = 0.90;
+/// A raise is kept only if the vsyncs are held again (58 of 60), as the speed
+/// must reach `KEEP_SPEED`; and the clock comes down only while both hold.
+const KEEP_PACE: f32 = 0.97;
 /// Behind windows in a row before a raise (one second).
 const UP_WINDOWS: u32 = 2;
 /// Windows thrown away right after a raise: the one the change happened in.
@@ -148,10 +165,17 @@ struct Gov {
     behind: u32,
     /// Sums over the windows of the current run (behind, or probe).
     speed_sum: f32,
+    pace_sum: f32,
     work_sum: f32,
-    /// Speed and work before the raise, kept for the probe's verdict.
+    /// Speed, pace and work before the raise, kept for the probe's verdict.
     base_speed: f32,
+    base_pace: f32,
     base_work: f32,
+    /// The current raise was for the vsyncs alone (the speed was held): it is
+    /// judged, and comes down, on the vsyncs. A raise for the speed is judged
+    /// on the speed as before, so a game whose vsyncs no clock can hold (the
+    /// GPU's) is never kept up for them.
+    pace_raise: bool,
     probe_n: u32,
     quiet: u32,
     quiet_needed: u32,
@@ -190,9 +214,12 @@ static GOV: Mutex<Gov> = Mutex::new(Gov {
     since: 0,
     behind: 0,
     speed_sum: 0.0,
+    pace_sum: 0.0,
     work_sum: 0.0,
     base_speed: 0.0,
+    base_pace: 0.0,
     base_work: 0.0,
+    pace_raise: false,
     probe_n: 0,
     quiet: 0,
     quiet_needed: DOWN_WINDOWS,
@@ -240,6 +267,7 @@ impl Gov {
         self.since = now;
         self.behind = 0;
         self.speed_sum = 0.0;
+        self.pace_sum = 0.0;
         self.work_sum = 0.0;
         self.probe_n = 0;
         self.quiet = 0;
@@ -305,20 +333,20 @@ impl Gov {
         ));
     }
 
-    fn decide(&mut self, now: u64, speed: f32, work_us: f32, budget_us: f32) {
+    fn decide(&mut self, now: u64, speed: f32, pace: f32, work_us: f32, budget_us: f32) {
         let f = freq();
         self.windows += 1;
         if self.windows % STATE_EVERY == 0 {
             let wait_s = self.retry_at.saturating_sub(now) / f;
             log(&std::format!(
-                "clocks: auto state={} speed={:.2} work={:.1}ms budget={:.1}ms quiet={}/{} wait={}s\n",
+                "clocks: auto state={} speed={:.2} pace={:.2} work={:.1}ms budget={:.1}ms quiet={}/{} wait={}s\n",
                 match self.phase {
                     Phase::Low => "LOW",
                     Phase::Probe => "PROBE",
                     Phase::High => "HIGH",
                     Phase::Off => "OFF",
                 },
-                speed, work_us / 1000.0, budget_us / 1000.0,
+                speed, pace, work_us / 1000.0, budget_us / 1000.0,
                 self.quiet, self.quiet_needed, wait_s,
             ));
         }
@@ -350,22 +378,27 @@ impl Gov {
                 // A REJECT made on another scene does not hold the wait
                 // (`STALE_SPEED`).
                 let stale = self.reject_speed > 0.0 && speed < STALE_SPEED * self.reject_speed;
-                if speed >= UP_SPEED || self.hot || (now < self.retry_at && !stale) {
+                let behind = speed < UP_SPEED || pace < UP_PACE;
+                if !behind || self.hot || (now < self.retry_at && !stale) {
                     self.behind = 0;
                     self.speed_sum = 0.0;
+                    self.pace_sum = 0.0;
                     self.work_sum = 0.0;
                     return;
                 }
                 self.behind += 1;
                 self.speed_sum += speed;
+                self.pace_sum += pace;
                 self.work_sum += work_us;
                 if self.behind < UP_WINDOWS {
                     return;
                 }
                 let base_speed = self.speed_sum / self.behind as f32;
+                let base_pace = self.pace_sum / self.behind as f32;
                 let base_work = self.work_sum / self.behind as f32;
                 self.behind = 0;
                 self.speed_sum = 0.0;
+                self.pace_sum = 0.0;
                 self.work_sum = 0.0;
                 // Back up within seconds of coming down: the DOWN was early.
                 // Ask for twice the quiet before the next one.
@@ -373,9 +406,11 @@ impl Gov {
                     self.quiet_needed = (self.quiet_needed * 2).min(QUIET_MAX);
                 }
                 let early = now < self.retry_at;
+                let pace_raise = base_speed >= UP_SPEED;
                 let mut why = std::format!(
-                    "speed={:.2} work={:.1}ms budget={:.1}ms",
-                    base_speed, base_work / 1000.0, budget_us / 1000.0,
+                    "speed={:.2} pace={:.2} work={:.1}ms budget={:.1}ms{}",
+                    base_speed, base_pace, base_work / 1000.0, budget_us / 1000.0,
+                    if pace_raise { " (vsyncs missed)" } else { "" },
                 );
                 if early {
                     why.push_str(&std::format!(
@@ -386,7 +421,9 @@ impl Gov {
                 if self.raise(now, &why) {
                     self.enter(Phase::Probe, now);
                     self.base_speed = base_speed;
+                    self.base_pace = base_pace;
                     self.base_work = base_work;
+                    self.pace_raise = pace_raise;
                     self.early_try = early;
                     if early {
                         self.earlies += 1;
@@ -404,19 +441,31 @@ impl Gov {
                     return;
                 }
                 self.speed_sum += speed;
+                self.pace_sum += pace;
                 self.work_sum += work_us;
                 if self.probe_n < PROBE_SKIP + PROBE_WINDOWS {
                     return;
                 }
                 let hi_speed = self.speed_sum / PROBE_WINDOWS as f32;
+                let hi_pace = self.pace_sum / PROBE_WINDOWS as f32;
                 let hi_work = self.work_sum / PROBE_WINDOWS as f32;
-                let gain = hi_speed / self.base_speed.max(0.01);
+                // The gain on what the raise was for.
+                let gain = if self.pace_raise {
+                    hi_pace / self.base_pace.max(0.01)
+                } else {
+                    hi_speed / self.base_speed.max(0.01)
+                };
                 let verdict = std::format!(
-                    "x{:.2} (speed {:.2} -> {:.2}, work {:.1} -> {:.1} ms)",
-                    gain, self.base_speed, hi_speed,
+                    "x{:.2} (speed {:.2} -> {:.2}, pace {:.2} -> {:.2}, work {:.1} -> {:.1} ms)",
+                    gain, self.base_speed, hi_speed, self.base_pace, hi_pace,
                     self.base_work / 1000.0, hi_work / 1000.0,
                 );
-                if hi_speed >= KEEP_SPEED || gain >= KEEP_GAIN {
+                let held = if self.pace_raise {
+                    hi_pace >= KEEP_PACE && hi_speed >= UP_SPEED
+                } else {
+                    hi_speed >= KEEP_SPEED
+                };
+                if held || gain >= KEEP_GAIN {
                     self.keeps += 1;
                     self.gain = gain;
                     self.backoff_s = RETRY_S;
@@ -447,7 +496,9 @@ impl Gov {
                     return;
                 }
                 let stock_us = work_us * STOCK_SCALE;
-                if speed >= KEEP_SPEED && stock_us <= TRY_GATE * budget_us {
+                // A raise for the vsyncs comes down only while they hold too.
+                let calm = speed >= KEEP_SPEED && (!self.pace_raise || pace >= KEEP_PACE);
+                if calm && stock_us <= TRY_GATE * budget_us {
                     self.quiet += 1;
                 } else {
                     self.quiet = 0;
@@ -461,8 +512,8 @@ impl Gov {
                     self.last_down = now;
                     self.lower(now);
                     log(&std::format!(
-                        "clocks: auto DOWN speed={:.2} work={:.1}ms budget={:.1}ms, after {} s\n",
-                        speed, work_us / 1000.0, budget_us / 1000.0, held_s,
+                        "clocks: auto DOWN speed={:.2} pace={:.2} work={:.1}ms budget={:.1}ms, after {} s\n",
+                        speed, pace, work_us / 1000.0, budget_us / 1000.0, held_s,
                     ));
                     return;
                 }
@@ -645,10 +696,13 @@ pub fn sample(t1: u64, tick_dt: u64, render_dt: u64, nominal_fps: f64) {
     let frames_eq = win.frames as f64 + (acc as f64 - win.acc_start as f64) / budget_us;
     let wall_us = dt as f64 * 1_000_000.0 / f as f64;
     let speed = (frames_eq.max(0.0) * budget_us / wall_us) as f32;
+    // Pace: the pictures presented over the display's vsyncs in that time
+    // (one host frame, one picture). Under 1, frames missed their vsync.
+    let pace = (win.renders as f64 * 1_000_000.0 / wall_us / DISPLAY_HZ) as f32;
     // Work of one SWF frame: its share of the ticks, plus one render.
     let to_us = 1_000_000.0 / f as f64;
     let work_us = (win.tick as f64 / win.frames as f64
         + win.render as f64 / win.renders.max(1) as f64)
         * to_us;
-    g.decide(t1, speed, work_us as f32, budget_us as f32);
+    g.decide(t1, speed, pace, work_us as f32, budget_us as f32);
 }
