@@ -1990,7 +1990,10 @@ pub extern "C" fn ruffle_init() -> c_int {
     // 29 % of its frames picking at (0, 0) (2026-10-24). The first move of the
     // cursor (stick, touch, gyro) or the first click puts it on the stage.
     // `sdmc:/switch/FlashNX/pointeridle.off`: on the stage from the start.
-    if !backend::render::marker_present("pointeridle.off") {
+    let pointer_idle = !backend::render::marker_present("pointeridle.off");
+    POINTER_IDLE.store(pointer_idle, core::sync::atomic::Ordering::Relaxed);
+    POINTER_ON_STAGE.store(false, core::sync::atomic::Ordering::Relaxed);
+    if pointer_idle {
         if let Ok(mut p) = player.lock() {
             p.set_mouse_in_stage(false);
         }
@@ -2681,6 +2684,20 @@ fn render_frame_with_dt(dt: FloatDuration) {
         Ok(p) => p,
         Err(_) => return,
     };
+    // The pointer leaves the stage again after POINTER_IDLE_S without a move
+    // or a click (see `ruffle_init`), silently: no MOUSE_LEAVE, which some
+    // games pause on; what it hovers stays hovered. A nudge of the stick or a
+    // touch had put it back for the rest of the game, and the search for what
+    // is under it with it (Super Mario Bros. Crossover's level 2: 12 % of its
+    // frames again, 2026-10-24). Never while a button is held.
+    if POINTER_ON_STAGE.load(core::sync::atomic::Ordering::Relaxed) && !state.cursor_clicked {
+        let now = unsafe { ruffle_tick_now() };
+        let idle = now.wrapping_sub(POINTER_LAST_USE.load(core::sync::atomic::Ordering::Relaxed));
+        if idle > POINTER_IDLE_S * unsafe { ruffle_tick_freq() } {
+            player.set_mouse_in_stage(false);
+            POINTER_ON_STAGE.store(false, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     // Profile tick (AVM1 advance + game logic + filter cache) vs render
     // (our backend dispatch: shape/bitmap/gradient draws to GL) so the
     // heartbeat in render.rs can show the breakdown — tells us whether
@@ -4689,6 +4706,25 @@ pub extern "C" fn ruffle_handle_key(code: c_int, down: bool) {
     }
 }
 
+/// The pointer is off the stage until used, and again after this long without
+/// a move or a click (`ruffle_init`, `render_frame_with_dt`).
+const POINTER_IDLE_S: u64 = 5;
+/// Whether the pointer leaves the stage when unused (`pointeridle.off`: never).
+static POINTER_IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// The pointer is on the stage because it was used, and when it last was
+/// (`ruffle_tick_now` ticks).
+static POINTER_ON_STAGE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static POINTER_LAST_USE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A move or a click of the pointer: on the stage, until it rests again.
+fn note_pointer_use(p: &mut ruffle_core::Player) {
+    p.set_mouse_in_stage(true);
+    if POINTER_IDLE.load(core::sync::atomic::Ordering::Relaxed) {
+        POINTER_LAST_USE.store(unsafe { ruffle_tick_now() }, core::sync::atomic::Ordering::Relaxed);
+        POINTER_ON_STAGE.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Move the virtual cursor to `(x, y)` in screen pixels and forward a
 /// `MouseMove` event to the Player. Called from C++ when the right stick
 /// is deflected or a touch event happens.
@@ -4752,9 +4788,9 @@ fn move_cursor(x: c_int, y: c_int, used: bool) {
     state.cursor_stage_x = gx;
     state.cursor_stage_y = gy;
     if let Ok(mut p) = state.player.lock() {
-        // The pointer is used: it is on the stage from now on (see `ruffle_init`).
+        // The pointer is used: it is on the stage (see `ruffle_init`).
         if used {
-            p.set_mouse_in_stage(true);
+            note_pointer_use(&mut p);
         }
         p.handle_event(PlayerEvent::MouseMove {
             x: gx as f64,
@@ -4787,7 +4823,7 @@ fn handle_mouse_button_impl(button: MouseButton, down: bool) {
         } else {
             PlayerEvent::MouseUp { x, y, button }
         };
-        p.set_mouse_in_stage(true);
+        note_pointer_use(&mut p);
         p.handle_event(event);
     }
 }

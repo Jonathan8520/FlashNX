@@ -593,6 +593,31 @@ level 1 at 60 fps at 1020 MHz. Ruffle AVM2 suite: 1067 pass, only
 `stage3d_rotating_cube` fails, as before. Left: the enterFrame pass still walks
 every orphan (~11 %), and `cleanup_dead_orphans` (~4 %).
 
+**`core/src/display_object.rs`, `orphan_manager.rs`, `frame_lifecycle.rs`,
+`display_object/movie_clip.rs`: the enter pass of a full frame takes its orphans
+from a queue too.**
+
+Quiet orphans (`ENTER_QUIET`) are passed over by the enter pass, so only those
+that may not be quiet need a visit. They go in a second queue
+(`queue_enter_orphan`): a quiet orphan only stops being quiet through
+`mark_lifecycle_dirty` or `mark_enter_needed`, which now queue its top; a new
+orphan, not quiet yet, is queued by `add_orphan_obj`; `MovieClip::replace_movie`
+resets the flags and plays again, so it calls `mark_enter_needed`. The pass takes
+the queue once (the list walk took a snapshot: an orphan queued meanwhile is
+visited next frame, as the walk would have left it), visits in list order
+(`resolve_listed`), and queues again each one still not quiet after its visit
+(`quiet_after_enter`). Behind `frameorphans.off` as well; the walk path drains
+the queue. Ruffle AVM2 suite unchanged (1067, `orphan_movie*` included).
+
+FlashNX side: the pointer leaves the stage again after 5 s without a move or a
+click (never while a button is held), silently: no `MouseLeave`, which some
+games pause on. A touch of the stick had put it back for the rest of the game,
+and with it 12 % of level 2's frames.
+
+On hardware, level 2 at 1020 MHz: 50-62 fps (median ~57), 17.6 ms a frame of
+which 14 % waits for the display; no orphan walk and no mouse pick left in the
+profile, which is now the game's ActionScript (~32 %) and drawing (~38 %).
+
 **`core/src/avm2/globals/flash/media/sound.rs`, `avm2/object/sound_object.rs`,
 `backend/audio.rs`, `backend/audio/mixer.rs`, `context.rs`: `SampleDataEvent`
 (backport of upstream PR ruffle#24762, closed unmerged).**
