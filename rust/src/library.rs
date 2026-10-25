@@ -10958,8 +10958,9 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
     }
 }
 
-/// CoverPicker navigation (Up/Down move, B cancel). A (fetch) and Minus
-/// (refine search) are hoisted in `input()` (HTTPS / swkbd).
+/// CoverPicker navigation (Up/Down move, Y logos or screenshots, X deletes
+/// the game's cover, B cancel). A (fetch) and Minus (refine search) are
+/// hoisted in `input()` (HTTPS / swkbd).
 fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let total = s.cover_candidates.len();
     let cols = COVER_PICKER_COLS;
@@ -10985,6 +10986,19 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             crate::backend::render::thumb_cancel_all();
             crate::sfx::value_changed();
         }
+        // The cover the game has, deleted (with any found under it): the
+        // picker stays up, to choose another or leave the game on its
+        // generated tile. Offered only when there is one.
+        "X" => match s.entries.get(game_idx).map(|e| e.basename.clone()) {
+            Some(basename) if crate::covers::remove_all(&basename) > 0 => {
+                crate::sd::commit();
+                crate::backend::render::invalidate_cover(&basename);
+                log(&std::format!("covers: \"{}\" cover removed\n", basename));
+                set_toast(s, crate::loc_ui::ui().cov_removed.to_string(), TOAST_INFO);
+                crate::sfx::value_changed();
+            }
+            _ => crate::sfx::hush(),
+        },
         "B" => {
             crate::backend::render::thumb_cancel_all();
             s.cover_candidates.clear();

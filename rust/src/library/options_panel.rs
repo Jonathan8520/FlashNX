@@ -607,10 +607,10 @@ pub(crate) fn draw_options_family(
     if dialog_key == 0 {
         crate::backend::render::dialog_pop_scale(0);
     }
-    // A question that has just gone (cancelled, or answered without leaving
-    // the panels) shrinks away like every other window, as it was last drawn:
-    // it grew in on its own and vanished in one frame. Not the cover picker,
-    // which asks nothing; not when the panels themselves are leaving.
+    // A question or the cover picker that has just gone (cancelled, answered
+    // or applied without leaving the panels) shrinks away like every other
+    // window, as it was last drawn: it grew in on its own and vanished in one
+    // frame. Not when the panels themselves are leaving.
     let freq = unsafe { ruffle_tick_freq() }.max(1);
     let (prev, prev_tick) = LAST_DIALOG.lock().map(|g| *g).unwrap_or((0, 0));
     // A question drawn more than a few frames ago is not the one that just
@@ -622,21 +622,29 @@ pub(crate) fn draw_options_family(
     if let Ok(mut g) = QUESTION_GHOST.lock() {
         if dialog_key != 0 {
             *g = None;
-        } else if recent && matches!(prev, 1..=3) && slide.is_none() {
+        } else if recent && matches!(prev, 1..=4) && slide.is_none() {
             *g = Some(now);
+            GHOST_KEY.store(prev, core::sync::atomic::Ordering::Relaxed);
         }
     }
     if dialog_key == 0 {
         if let Some(scale) = question_ghost_scale(now, freq) {
-            let q = LAST_QUESTION.lock().ok().and_then(|g| g.clone());
-            if let Some(q) = q {
-                // It takes no taps on its way out.
-                crate::backend::render::set_ui_screen_kind(0);
-                backend.set_ui_modal_scale(scale);
-                draw_question(backend, &q);
-                backend.clear_ui_transform();
-                crate::backend::render::set_ui_screen_kind(kind);
+            // It takes no taps on its way out.
+            crate::backend::render::set_ui_screen_kind(0);
+            backend.set_ui_modal_scale(scale);
+            if GHOST_KEY.load(core::sync::atomic::Ordering::Relaxed) == 4 {
+                let p = LAST_PICKER.lock().ok().and_then(|g| g.clone());
+                if let Some(p) = p {
+                    draw_picker(backend, &p, true);
+                }
+            } else {
+                let q = LAST_QUESTION.lock().ok().and_then(|g| g.clone());
+                if let Some(q) = q {
+                    draw_question(backend, &q);
+                }
             }
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(kind);
         }
     }
 }
@@ -646,6 +654,31 @@ static LAST_DIALOG: Mutex<(u32, u64)> = Mutex::new((0, 0));
 
 /// When the last question went away, for its shrink.
 static QUESTION_GHOST: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Which window is shrinking away: a question's `dialog_key`, or 4 for the
+/// cover picker.
+static GHOST_KEY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The cover picker as it was last drawn, for its shrink: by then B or A has
+/// already cleared the candidates it showed.
+#[derive(Clone)]
+struct Picker {
+    name: std::string::String,
+    selection: usize,
+    titles: std::vec::Vec<std::string::String>,
+    urls: std::vec::Vec<std::string::String>,
+    msg: std::string::String,
+    use_shot: bool,
+    can_remove: bool,
+}
+
+static LAST_PICKER: Mutex<Option<Picker>> = Mutex::new(None);
+
+fn draw_picker(backend: &mut SwitchRenderBackend, p: &Picker, still: bool) {
+    let titles: std::vec::Vec<&str> = p.titles.iter().map(|x| x.as_str()).collect();
+    let urls: std::vec::Vec<&str> = p.urls.iter().map(|x| x.as_str()).collect();
+    backend.draw_library_cover_picker(&p.name, p.selection, &titles, &urls, &p.msg, p.use_shot, p.can_remove, still);
+}
 
 /// The scale of a question shrinking away, None once it has gone: the window
 /// timeline's close, 110 ms accelerating away.
@@ -1032,9 +1065,14 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                 (titles, urls, s.cover_msg.clone(), s.cover_use_shot)
             });
             if let Some((titles, urls, msg, use_shot)) = snap {
-                let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
-                let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
-                backend.draw_library_cover_picker(&entry.display_name, selection, &title_refs, &url_refs, &msg, use_shot);
+                // X deletes the cover the game has: offered only when it has
+                // one (the cached answer the panel's header draws from).
+                let can_remove = backend.cover_thumb(&entry.basename).is_some();
+                let p = Picker { name: entry.display_name.clone(), selection, titles, urls, msg, use_shot, can_remove };
+                draw_picker(backend, &p, false);
+                if let Ok(mut g) = LAST_PICKER.lock() {
+                    *g = Some(p);
+                }
             }
         }
         _ => {}

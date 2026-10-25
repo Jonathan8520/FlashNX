@@ -11,7 +11,9 @@ impl SwitchRenderBackend {
     /// OPTIONS > cover: the candidates found online as a grid, the gold ring
     /// gliding between them, the chosen one's title under the grid.
     /// `use_shot` says whether the grid shows screenshots rather than logos,
-    /// for Y's hint, which names what pressing it gives.
+    /// for Y's hint, which names what pressing it gives. `can_remove`: the game
+    /// has a cover, which X deletes. `still`: the window shrinking away once
+    /// closed, drawn as it was, which starts no download and takes no taps.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_library_cover_picker(
         &mut self,
@@ -21,6 +23,8 @@ impl SwitchRenderBackend {
         urls: &[&str],
         msg: &str,
         use_shot: bool,
+        can_remove: bool,
+        still: bool,
     ) {
         use super::super::kit::theme::{radius, ring};
         const W: f32 = 980.0;
@@ -45,11 +49,18 @@ impl SwitchRenderBackend {
                 self.kit_text_mid((frame.x + (frame.w - lw) * 0.5).round(), ly, size::BODY, line, col::TEXT2);
                 ly += 26.0;
             }
-            self.modal_hints(&frame, &[(&[Btn::Minus], u.hint_search), (&[Btn::B], u.back)], false);
+            let mut hints: std::vec::Vec<HintItem> = std::vec![(&[Btn::Minus], u.hint_search)];
+            if can_remove {
+                hints.push((&[Btn::X], lc.opt_delete));
+            }
+            hints.push((&[Btn::B], u.back));
+            self.modal_hints(&frame, &hints, false);
             // Nothing to tap here. Published all the same: the last table under
             // this tag is the options panel's, and two taps on the dimmed
             // panel around the window moved the picker's hidden cursor.
-            ui_cells_publish(ui_screen_kind(), std::vec::Vec::new());
+            if !still {
+                ui_cells_publish(ui_screen_kind(), std::vec::Vec::new());
+            }
             unsafe {
                 glUseProgram(0);
                 glBindVertexArray(0);
@@ -65,7 +76,9 @@ impl SwitchRenderBackend {
         note_cover_foot(&frame);
         let grid_top = frame.y + MODAL_PAD_TOP - 14.0;
         let grid_left = frame.x + MARGIN;
-        self.pump_thumbnail_load();
+        if !still {
+            self.pump_thumbnail_load();
+        }
         let now = unsafe { ruffle_tick_now() };
         let (fx, fy) = if selection < n {
             (
@@ -80,7 +93,8 @@ impl SwitchRenderBackend {
             let cx = grid_left + (i % cols) as f32 * (cell_w + GAP);
             let cy = grid_top + (i / cols) as f32 * (THUMB_H + GAP);
             cells.push((cx, cy, cell_w, THUMB_H));
-            match self.thumb_for(urls[i]) {
+            let thumb = if still { thumb_lookup(urls[i]) } else { self.thumb_for(urls[i]) };
+            match thumb {
                 Some(ThumbTex::Image { tex, w, h, amb }) => self.kit_cover(cx, cy, cell_w, THUMB_H, tex, w, h, amb, 1.0),
                 other => {
                     self.kit_rrect(cx, cy, cell_w, THUMB_H, radius::TILE, col::TILE);
@@ -89,7 +103,9 @@ impl SwitchRenderBackend {
                 }
             }
         }
-        ui_cells_publish(ui_screen_kind(), cells);
+        if !still {
+            ui_cells_publish(ui_screen_kind(), cells);
+        }
         if selection < n {
             self.kit_ring(fx, fy, cell_w, THUMB_H, radius::TILE, ring::GAP, ring::WIDTH, col::GOLD);
         }
@@ -99,16 +115,13 @@ impl SwitchRenderBackend {
             let ty = grid_top + rows as f32 * (THUMB_H + GAP) + 14.0;
             self.kit_text_mid((frame.x + (frame.w - tw) * 0.5).round(), ty, size::BODY, &shown, col::TEXT2);
         }
-        self.modal_hints(
-            &frame,
-            &[
-                (&[Btn::A], u.apply),
-                (&[Btn::Y], y_hint),
-                (&[Btn::Minus], u.hint_search),
-                (&[Btn::B], u.back),
-            ],
-            false,
-        );
+        let mut hints: std::vec::Vec<HintItem> =
+            std::vec![(&[Btn::A], u.apply), (&[Btn::Y], y_hint), (&[Btn::Minus], u.hint_search)];
+        if can_remove {
+            hints.push((&[Btn::X], lc.opt_delete));
+        }
+        hints.push((&[Btn::B], u.back));
+        self.modal_hints(&frame, &hints, false);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

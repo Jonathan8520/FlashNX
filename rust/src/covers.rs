@@ -617,6 +617,34 @@ pub fn remove_for(basename: &str) -> u32 {
     removed
 }
 
+/// X in the cover picker: every cover `basename` has goes, the one shown
+/// first, then any `resolve` finds after it (a picture dropped by hand under a
+/// downloaded one), so the game is left with its generated tile and not with
+/// the cover that was hiding under the first. Its tile thumbnail goes with
+/// them. The caller commits the card. Returns how many files went.
+pub fn remove_all(basename: &str) -> u32 {
+    let mut removed = 0u32;
+    // Four names in each games folder, and the cache (`resolve`); a file that
+    // will not go ends the loop rather than being found again.
+    for _ in 0..16 {
+        let Cover::Image(path) = resolve(basename) else { break };
+        if std::fs::remove_file(&path).is_err() {
+            crate::net::log(&std::format!("covers: {} could not be removed\n", path));
+            break;
+        }
+        crate::library::note_file_removed(&path);
+        removed += 1;
+    }
+    let thumb = thumb_path(basename);
+    if std::fs::remove_file(&thumb).is_ok() {
+        crate::library::note_file_removed(&thumb);
+    }
+    if removed > 0 {
+        bump_generation();
+    }
+    removed
+}
+
 // ── HOME-menu shortcut icon ────────────────────────────────────────────────
 
 /// The game's box art as a 256x256 JPEG, for its icon on the HOME menu.
