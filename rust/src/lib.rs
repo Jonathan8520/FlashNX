@@ -1882,6 +1882,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     // `sdmc:/switch/FlashNX/gmenative.off`: a game's CrossBridge libgme runs as
     // it ships, compiled to ActionScript (see gme.rs and `flashnx_gme` in our
     // Ruffle).
+    // `sdmc:/switch/FlashNX/busyspinner.off`: a frame computing for seconds
+    // shows nothing turning (see `busy_frame`).
+    let busy_spinner = !backend::render::marker_present("busyspinner.off");
+    BUSY_SPINNER.store(busy_spinner, core::sync::atomic::Ordering::Relaxed);
+    if !busy_spinner {
+        log(b"busy: busyspinner.off present -> no spinner over a computing frame\n\0");
+    }
     let gme_native = !backend::render::marker_present("gmenative.off");
     gme::install(gme_native);
     if !gme_native {
@@ -2832,8 +2839,10 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if let Some((total_us, tick_us, render_us)) = slow_frame {
             backend.log_slow_frame(total_us, tick_us, render_us);
         }
-        // The game runs: the picture a pause kept is of no further use.
+        // The game runs: the picture a pause kept is of no further use, nor
+        // the one the busy spinner turned over (`busy_frame`).
         backend.pause_snapshot_release();
+        BUSY_SHOWN.store(false, core::sync::atomic::Ordering::Relaxed);
         if let Some(asked) = load_failed() {
             backend.draw_load_failed(&asked);
         }
@@ -2867,7 +2876,39 @@ fn render_frame_with_dt(dt: FloatDuration) {
     extern "C" {
         fn flashnx_minus_pending() -> c_int;
     }
-    state.executor.run_until(|| unsafe { flashnx_minus_pending() } != 0);
+    // Past a second of loading, the busy spinner turns between two loads, as
+    // over a frame that computes (`busy_frame`): the player is not locked
+    // here, and the cursor stood still the whole time (Dragon City, some
+    // thirty files in a row, 2026-10-25). One big file has no point to turn
+    // it in, and the spinner waits for it.
+    let drain_t0 = unsafe { ruffle_tick_now() };
+    let busy_after = unsafe { ruffle_tick_freq() } * BUSY_AFTER_MS / 1000;
+    let player_ref = state.player.clone();
+    let mut spun = false;
+    state.executor.run_until(|| {
+        if unsafe { flashnx_minus_pending() } != 0 {
+            return true;
+        }
+        if unsafe { ruffle_tick_now() }.saturating_sub(drain_t0) >= busy_after {
+            if let Ok(mut p) = player_ref.try_lock() {
+                busy_frame(p.renderer_mut());
+                spun = true;
+            }
+        }
+        false
+    });
+    // The loop shows what the screen buffer holds once this returns: the
+    // finished frame alone, not a last turn of the spinner.
+    if spun && BUSY_SHOWN.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Ok(mut p) = player_ref.try_lock() {
+            if let Some(backend) =
+                <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(p.renderer_mut())
+            {
+                backend.clear_ui_transform();
+                backend.frozen_frame_begin();
+            }
+        }
+    }
 }
 
 /// Redraw the current Player state WITHOUT advancing AVM/animation by a
@@ -3124,6 +3165,9 @@ fn script_hook(
             }
         }
     }
+    if elapsed >= core::time::Duration::from_millis(BUSY_AFTER_MS) {
+        busy_frame(renderer);
+    }
     if unsafe { flashnx_take_minus_pressed() } == 0 {
         return (false, ZERO);
     }
@@ -3155,6 +3199,51 @@ fn script_hook(
     }
 }
 
+/// A frame that has computed this long shows a spinner (`busy_frame`).
+const BUSY_AFTER_MS: u64 = 1000;
+/// On (default) or off (`busyspinner.off` marker).
+static BUSY_SPINNER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// The screen holds the busy picture: the last finished frame was kept for it
+/// (`pause_snapshot_capture`), and a pause opened meanwhile uses that one.
+/// Cleared when a frame is drawn again.
+static BUSY_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BUSY_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One picture of a frame the game is still computing (`script_hook`): the
+/// last finished frame, kept, with a spinner turning in a corner, ten times a
+/// second. A loading can hold a frame for many seconds with nothing moving,
+/// not even the cursor (Super Mario Bros. Crossover: ~22 s of white screen),
+/// and a player cannot tell it from a crash (Jonathan, 2026-10-25). Shown
+/// without waiting for the vsync (`gl_context_swap_immediate`): the time is
+/// the game's. Native work with no script running in it (decoding a big file,
+/// a full collection) has no hook, and the spinner stops for that long.
+fn busy_frame(renderer: &mut dyn ruffle_render::backend::RenderBackend) {
+    use std::sync::atomic::Ordering::Relaxed;
+    extern "C" {
+        fn gl_context_swap_immediate();
+    }
+    if !BUSY_SPINNER.load(Relaxed) {
+        return;
+    }
+    let now = unsafe { ruffle_tick_now() };
+    if now.saturating_sub(BUSY_LAST.load(Relaxed)) < unsafe { ruffle_tick_freq() } / 10 {
+        return;
+    }
+    BUSY_LAST.store(now, Relaxed);
+    let Some(backend) = <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer) else {
+        return;
+    };
+    if !BUSY_SHOWN.swap(true, Relaxed) {
+        // What the screen holds now: the last frame the game finished.
+        backend.pause_snapshot_capture();
+    }
+    backend.clear_ui_transform();
+    backend.frozen_frame_begin();
+    backend.draw_busy_spinner(now);
+    backend.clear_ui_transform();
+    unsafe { gl_context_swap_immediate() };
+}
+
 /// The pause inside a computing frame (`script_hook`), until it is left: 0
 /// Resume, 1 Quit, 2 Restart, 3 the console closing FlashNX. The same panel as
 /// the loop's, over the picture on screen when it opened; the rows that need
@@ -3175,8 +3264,11 @@ fn frozen_pause(backend: &mut SwitchRenderBackend, elapsed_ms: u64) -> u8 {
     let (resume, restart, quit) = (row("REPRENDRE"), row("REDEMARRER"), row("QUITTER"));
     let rows = MENU_ITEMS.len();
     unsafe { flashnx_frozen_pad_reset() };
-    // What the screen holds now: the last frame the game finished.
-    backend.pause_snapshot_capture();
+    // What the screen holds now: the last frame the game finished. Already
+    // kept when the busy spinner shows, the spinner drawn over it on screen.
+    if !BUSY_SHOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        backend.pause_snapshot_capture();
+    }
     backend::render::set_pause_frozen(true);
     backend::render::modal_open_begin();
     backend::render::pause_reset();

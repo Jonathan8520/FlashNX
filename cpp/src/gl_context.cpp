@@ -90,6 +90,16 @@ extern "C" void gl_context_swap(void) {
     eglSwapBuffers(s_display, s_surface);
 }
 
+/// Show what was drawn without waiting for the next vsync: the busy spinner
+/// drawn from inside a script that holds the frame (lib.rs, `busy_frame`). The
+/// game is computing there, and a wait of up to 16.7 ms for each turn of the
+/// spinner would come out of its loading. A torn spinner is no matter.
+extern "C" void gl_context_swap_immediate(void) {
+    eglSwapInterval(s_display, 0);
+    eglSwapBuffers(s_display, s_surface);
+    eglSwapInterval(s_display, 1);
+}
+
 /// Change the INTERNAL render resolution by recreating just the window surface.
 ///
 /// The display scaler upscales whatever the surface is to the panel, so a smaller

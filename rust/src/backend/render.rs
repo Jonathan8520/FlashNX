@@ -12691,6 +12691,19 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// The spinner a frame the game is still computing shows in a corner
+    /// (lib.rs, `busy_frame`), on a dark disc so it reads on any picture,
+    /// Super Mario Bros. Crossover's white loading screen included.
+    pub fn draw_busy_spinner(&mut self, now: u64) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let r = 16.0;
+        let disc = 2.0 * r + 22.0;
+        let (cx, cy) = (vw - 24.0 - disc * 0.5, vh - 24.0 - disc * 0.5);
+        self.kit_rrect(cx - disc * 0.5, cy - disc * 0.5, disc, disc, disc * 0.5, 0xB0_06_0A_14);
+        self.draw_spinner(cx, cy, r, now);
+    }
+
     /// A title above a centred spinner, for the loading overlay. The caller
     /// fills the screen first (so what is behind is dimmed, not seen through).
     pub fn draw_loading_panel(&mut self, title: &str, now: u64) {

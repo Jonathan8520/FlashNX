@@ -6,6 +6,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ### Added
 
+- **A spinner while a game loads.** A game can hold the screen for many seconds while it computes or loads its files, with nothing moving, not even the cursor, which looked like a crash (Super Mario Bros. Crossover's white screen, Dragon City's loadings). After a second of it, a spinner now turns in a corner until the game shows its next picture. It can stop for a moment while one large file is read.
 - **Sound that games make while they play** (#136). A game can compute its sound in ActionScript instead of playing recorded files (`SampleDataEvent`); FlashNX had no support for it, so such games were silent. Super Mario Bros. Crossover makes all its music and sound effects this way: they play now.
 
 ### Performance
