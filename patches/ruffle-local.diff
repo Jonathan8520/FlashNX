@@ -11967,9 +11967,18 @@ index 23f60ca4d..3e4374c3a 100644
      const INPUT_NEWLINE: char = '\r';
  
 diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
-index 2a73ff9c2..052811b50 100644
+index 2a73ff9c2..08d6dae01 100644
 --- a/core/src/display_object/graphic.rs
 +++ b/core/src/display_object/graphic.rs
+@@ -9,7 +9,7 @@ use crate::drawing::Drawing;
+ use crate::library::MovieLibrarySource;
+ use crate::prelude::*;
+ use crate::tag_utils::SwfMovie;
+-use crate::tessellation_cache::TessellationCache;
++use crate::tessellation_cache::{TessellationCache, render_scale};
+ use crate::vminterface::Instantiator;
+ use core::fmt;
+ use gc_arena::barrier::unlock;
 @@ -47,21 +47,38 @@ pub struct GraphicData<'gc> {
  }
  
@@ -11991,7 +12000,7 @@ index 2a73ff9c2..052811b50 100644
 -            bounds: swf_shape.shape_bounds,
 -            render_handle: Some(
 +        // FlashNX: the shape is registered with the renderer the first time it
-+        // is drawn, not here. Upstream tessellates every DefineShape while the
++        // is drawn, at the scale it is drawn at, not here. Upstream tessellates every DefineShape while the
 +        // movie preloads, which decodes every bitmap the fills use and uploads
 +        // it: Super Smash Flash 2 had 79 of its 81 atlases (1 049 MB) holding
 +        // images never shown once, and still 553 MB after a whole fight, on a
@@ -12024,7 +12033,45 @@ index 2a73ff9c2..052811b50 100644
              shape: swf::Shape {
                  version: 32,
                  id: 0,
-@@ -171,6 +188,32 @@ impl<'gc> Graphic<'gc> {
+@@ -126,12 +143,17 @@ impl<'gc> Graphic<'gc> {
+     }
+ 
+     /// Returns the best shape handle for the current scale, retessellating if necessary.
++    ///
++    /// FlashNX: this is also the shape's first registration. Upstream drew
++    /// from a scale-1 handle registered at preload and kept it beside the
++    /// scaled ones; registered on first draw as well, it put every shape
++    /// drawn twice in the renderer's arena (#137). Only `lazyshape.off` still
++    /// makes it, and it is the fallback when the movie's library is gone.
+     fn get_or_retessellate_handle(
+         self,
+         context: &mut RenderContext,
+-        base_handle: &ShapeHandle,
+         current_scale: f32,
+-    ) -> ShapeHandle {
++    ) -> Option<ShapeHandle> {
+         // Since graphics are created from a shared shape, we may be able to reuse a
+         // cached tessellation from another instance at a similar scale.
+         let shared = self.0.shared.get();
+@@ -140,7 +162,7 @@ impl<'gc> Graphic<'gc> {
+             let mut cache = shared.scaled_handle.borrow_mut();
+             if let Some(handle) = cache.find_near_and_touch(current_scale) {
+                 // Found a cached handle at a similar scale; reuse it.
+-                return handle;
++                return Some(handle);
+             }
+         }
+ 
+@@ -164,13 +186,21 @@ impl<'gc> Graphic<'gc> {
+                 cache.insert(current_scale, new_handle.clone());
+             }
+ 
+-            new_handle
++            Some(new_handle)
+         } else {
+-            base_handle.clone()
++            shared.render_handle.get().cloned().flatten()
+         }
      }
  }
  
@@ -12036,43 +12083,43 @@ index 2a73ff9c2..052811b50 100644
 +    LAZY_SHAPES.store(enabled, std::sync::atomic::Ordering::Relaxed);
 +}
 +
-+impl<'gc> Graphic<'gc> {
-+    /// The shape's renderer handle, registering it on the first call.
-+    fn base_handle(self, context: &mut RenderContext) -> Option<ShapeHandle> {
-+        let shared = self.0.shared.get();
-+        shared
-+            .render_handle
-+            .get_or_init(|| {
-+                let library = context.library.library_for_movie(shared.movie.clone())?;
-+                Some(
-+                    context
-+                        .renderer
-+                        .register_shape((&shared.shape).into(), &MovieLibrarySource { library }),
-+                )
-+            })
-+            .clone()
-+    }
-+}
-+
  impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
      fn base(self) -> Gc<'gc, DisplayObjectBase<'gc>> {
          HasPrefixField::as_prefix_gc(self.0)
-@@ -249,7 +292,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+@@ -249,19 +279,16 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  
          if let Some(drawing) = self.0.drawing.get() {
              drawing.borrow().render(context);
 -        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
-+        } else if let Some(base_handle) = self.base_handle(context) {
++        } else if !matches!(self.0.shared.get().render_handle.get(), Some(None)) {
              let transform = context.transform_stack.transform();
  
              // Calculate the current scale from the transform, to determine if
-@@ -332,7 +375,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+             // we can reuse a cached tessellation or need to retessellate.
+-            let matrix = &transform.matrix;
+-            let scale_x = f32::abs(matrix.a + matrix.c);
+-            let scale_y = f32::abs(matrix.b + matrix.d);
+-            let current_scale = ((scale_x * scale_x + scale_y * scale_y) / 2.0).sqrt();
+-
+-            let handle = self.get_or_retessellate_handle(context, &base_handle, current_scale);
++            let current_scale = render_scale(&transform.matrix);
+ 
+-            context.commands.render_shape(handle, transform)
++            if let Some(handle) = self.get_or_retessellate_handle(context, current_scale) {
++                context.commands.render_shape(handle, transform)
++            }
+         }
+     }
+ 
+@@ -332,7 +359,11 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  struct GraphicShared {
      id: CharacterId,
      shape: swf::Shape,
 -    render_handle: Option<ShapeHandle>,
-+    /// Registered on first draw (see `Graphic::base_handle`); `None` inside
-+    /// when there is nothing to register (an empty Graphic, or no library).
++    /// The scale-1 handle: only `lazyshape.off` registers it, at preload.
++    /// Shapes are drawn from `scaled_handle`, filled on first draw (see
++    /// `get_or_retessellate_handle`). `Some(None)` for an empty Graphic,
++    /// which has nothing to draw.
 +    render_handle: OnceCell<Option<ShapeHandle>>,
      bounds: Rectangle<Twips>,
      movie: Arc<SwfMovie>,
@@ -12103,10 +12150,18 @@ index 280bb9954..7073a2393 100644
          }
      }
 diff --git a/core/src/display_object/morph_shape.rs b/core/src/display_object/morph_shape.rs
-index c4f4a8880..a5d6b5763 100644
+index c4f4a8880..a16dedb62 100644
 --- a/core/src/display_object/morph_shape.rs
 +++ b/core/src/display_object/morph_shape.rs
-@@ -40,6 +40,11 @@ pub struct MorphShapeData<'gc> {
+@@ -5,6 +5,7 @@ use crate::display_object::{BoundsMode, DisplayObjectBase};
+ use crate::library::{Library, MovieLibrarySource};
+ use crate::prelude::*;
+ use crate::tag_utils::SwfMovie;
++use crate::tessellation_cache::{TessellationCache, render_scale};
+ use crate::vminterface::Instantiator;
+ use core::fmt;
+ use gc_arena::barrier::unlock;
+@@ -40,6 +41,11 @@ pub struct MorphShapeData<'gc> {
  }
  
  impl<'gc> MorphShape<'gc> {
@@ -12118,6 +12173,71 @@ index c4f4a8880..a5d6b5763 100644
      pub fn from_swf_tag(
          gc_context: &Mutation<'gc>,
          tag: swf::DefineMorphShape,
+@@ -114,10 +120,10 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
+     fn render_self(self, context: &mut RenderContext) {
+         let ratio = self.ratio();
+         let shared = self.0.shared.get();
+-        let shape_handle = shared.get_shape(context, context.library, ratio);
+-        context
+-            .commands
+-            .render_shape(shape_handle, context.transform_stack.transform());
++        let transform = context.transform_stack.transform();
++        let scale = render_scale(&transform.matrix);
++        let shape_handle = shared.get_shape(context, context.library, ratio, scale);
++        context.commands.render_shape(shape_handle, transform);
+     }
+ 
+     fn self_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+@@ -178,7 +184,8 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
+ 
+ /// A precalculated intermediate frame for a morph shape.
+ struct Frame {
+-    shape_handle: Option<ShapeHandle>,
++    /// FlashNX: one mesh per scale it is drawn at, like a `Graphic` (#137).
++    shape_handle: TessellationCache,
+     shape: swf::Shape,
+     bounds: Rectangle<Twips>,
+ }
+@@ -218,21 +225,25 @@ impl MorphShapeShared {
+ 
+     /// Retrieves the `ShapeHandle` for the given ratio.
+     /// Lazily initializes and tessellates the shape if it does not yet exist.
++    /// FlashNX: tessellated for `scale`, retessellated past twice or half of it.
+     fn get_shape<'gc>(
+         &self,
+         context: &mut RenderContext<'_, 'gc>,
+         library: &Library<'gc>,
+         ratio: u16,
++        scale: f32,
+     ) -> ShapeHandle {
+         let mut frame = self.get_frame(ratio);
+-        if let Some(handle) = frame.shape_handle.clone() {
++        if let Some(handle) = frame.shape_handle.find_near_and_touch(scale) {
+             handle
+         } else {
+             let library = library.library_for_movie(self.movie.clone()).unwrap();
+-            let handle = context
+-                .renderer
+-                .register_shape((&frame.shape).into(), &MovieLibrarySource { library });
+-            frame.shape_handle = Some(handle.clone());
++            let handle = context.renderer.register_shape_with_scale(
++                (&frame.shape).into(),
++                &MovieLibrarySource { library },
++                scale,
++            );
++            frame.shape_handle.insert(scale, handle.clone());
+             handle
+         }
+     }
+@@ -363,7 +374,7 @@ impl MorphShapeShared {
+         };
+ 
+         Frame {
+-            shape_handle: None,
++            shape_handle: TessellationCache::new(),
+             shape,
+             bounds,
+         }
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
 index baa4a03c5..891e9aba8 100644
 --- a/core/src/display_object/movie_clip.rs
@@ -12908,6 +13028,236 @@ index 7c7047526..45fe4f773 100644
      pub fn from_swf_tag(
          context: &mut UpdateContext<'gc>,
          swf: Arc<SwfMovie>,
+diff --git a/core/src/drawing.rs b/core/src/drawing.rs
+index 6a87ca93d..864314dca 100644
+--- a/core/src/drawing.rs
++++ b/core/src/drawing.rs
+@@ -1,16 +1,19 @@
+ use crate::context::RenderContext;
++use crate::tessellation_cache::{TessellationCache, render_scale};
+ use ruffle_render::backend::{RenderBackend, ShapeHandle};
+ use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, BitmapSize, BitmapSource};
+ use ruffle_render::commands::CommandHandler;
+ use ruffle_render::shape_utils::{
+     DistilledShape, DrawCommand, DrawPath, FillRule, cubic_curve_bounds, quadratic_curve_bounds,
+ };
+-use std::cell::OnceCell;
++use std::cell::{OnceCell, RefCell};
+ use swf::{FillStyle, LineStyle, Point, Rectangle, Twips};
+ 
+ #[derive(Clone, Debug)]
+ pub struct Drawing {
+     render_handle: OnceCell<ShapeHandle>,
++    /// FlashNX: what `render` draws, one mesh per scale (#137).
++    scaled_handle: RefCell<TessellationCache>,
+     shape_bounds: Rectangle<Twips>,
+     edge_bounds: Rectangle<Twips>,
+     paths: Vec<DrawingPath>,
+@@ -35,6 +38,7 @@ impl Drawing {
+     pub fn new() -> Self {
+         Self {
+             render_handle: OnceCell::new(),
++            scaled_handle: RefCell::new(TessellationCache::new()),
+             shape_bounds: Default::default(),
+             edge_bounds: Default::default(),
+             paths: Vec::new(),
+@@ -52,6 +56,7 @@ impl Drawing {
+     pub fn from_swf_shape(shape: &swf::Shape) -> Self {
+         let mut this = Self {
+             render_handle: OnceCell::new(),
++            scaled_handle: RefCell::new(TessellationCache::new()),
+             shape_bounds: shape.shape_bounds,
+             edge_bounds: shape.edge_bounds,
+             paths: Vec::new(),
+@@ -107,6 +112,7 @@ impl Drawing {
+     fn mark_dirty(&mut self) {
+         self.is_empty = false;
+         self.render_handle.take();
++        *self.scaled_handle.get_mut() = TessellationCache::new();
+     }
+ 
+     /// Set fill style and reset fill rule to default.
+@@ -163,6 +169,7 @@ impl Drawing {
+ 
+         // An empty drawing doesn't need to hold onto a `ShapeHandle`.
+         self.render_handle.take();
++        *self.scaled_handle.get_mut() = TessellationCache::new();
+     }
+ 
+     pub fn set_line_style(&mut self, style: Option<LineStyle>) {
+@@ -245,84 +252,105 @@ impl Drawing {
+             return None;
+         }
+ 
+-        let handle = self.render_handle.get_or_init(|| {
+-            let mut paths = Vec::with_capacity(self.paths.len());
+-
+-            for path in &self.paths {
+-                match path {
+-                    DrawingPath::Fill(fill) => {
+-                        paths.push(DrawPath::Fill {
+-                            style: &fill.style,
+-                            commands: fill.commands.to_owned(),
+-                            winding_rule: fill.rule,
+-                        });
+-                    }
+-                    DrawingPath::Line(line) => {
+-                        paths.push(DrawPath::Stroke {
+-                            style: &line.style,
+-                            commands: line.commands.to_owned(),
+-                            is_closed: line.is_closed,
+-                        });
+-                    }
+-                }
+-            }
++        let handle = self
++            .render_handle
++            .get_or_init(|| self.register(renderer, None));
+ 
+-            if let Some(fill) = &self.current_fill {
+-                paths.push(DrawPath::Fill {
+-                    style: &fill.style,
+-                    commands: fill.commands.to_owned(),
+-                    winding_rule: fill.rule,
+-                })
+-            }
++        Some(handle.clone())
++    }
+ 
+-            for line in &self.pending_lines {
+-                let mut commands = line.commands.to_owned();
+-                let is_closed = if self.current_fill.is_some() {
+-                    commands.push(DrawCommand::LineTo(self.fill_start));
+-                    true
+-                } else {
+-                    self.cursor == self.fill_start
+-                };
+-                paths.push(DrawPath::Stroke {
+-                    style: &line.style,
+-                    commands,
+-                    is_closed,
+-                })
+-            }
++    /// FlashNX: the shape `register_or_replace` registers, tessellated at
++    /// `scale` when one is given (see `render`).
++    fn register(&self, renderer: &mut dyn RenderBackend, scale: Option<f32>) -> ShapeHandle {
++        let mut paths = Vec::with_capacity(self.paths.len());
+ 
+-            if let Some(line) = &self.current_line {
+-                let mut commands = line.commands.to_owned();
+-                let is_closed = if self.current_fill.is_some() {
+-                    commands.push(DrawCommand::LineTo(self.fill_start));
+-                    true
+-                } else {
+-                    self.cursor == self.fill_start
+-                };
+-                paths.push(DrawPath::Stroke {
+-                    style: &line.style,
+-                    commands,
+-                    is_closed,
+-                })
++        for path in &self.paths {
++            match path {
++                DrawingPath::Fill(fill) => {
++                    paths.push(DrawPath::Fill {
++                        style: &fill.style,
++                        commands: fill.commands.to_owned(),
++                        winding_rule: fill.rule,
++                    });
++                }
++                DrawingPath::Line(line) => {
++                    paths.push(DrawPath::Stroke {
++                        style: &line.style,
++                        commands: line.commands.to_owned(),
++                        is_closed: line.is_closed,
++                    });
++                }
+             }
++        }
+ 
+-            let shape = DistilledShape {
+-                paths,
+-                shape_bounds: self.shape_bounds,
+-                edge_bounds: self.edge_bounds,
+-                id: 0,
++        if let Some(fill) = &self.current_fill {
++            paths.push(DrawPath::Fill {
++                style: &fill.style,
++                commands: fill.commands.to_owned(),
++                winding_rule: fill.rule,
++            })
++        }
++
++        for line in &self.pending_lines {
++            let mut commands = line.commands.to_owned();
++            let is_closed = if self.current_fill.is_some() {
++                commands.push(DrawCommand::LineTo(self.fill_start));
++                true
++            } else {
++                self.cursor == self.fill_start
+             };
+-            renderer.register_shape(shape, self)
+-        });
++            paths.push(DrawPath::Stroke {
++                style: &line.style,
++                commands,
++                is_closed,
++            })
++        }
+ 
+-        Some(handle.clone())
++        if let Some(line) = &self.current_line {
++            let mut commands = line.commands.to_owned();
++            let is_closed = if self.current_fill.is_some() {
++                commands.push(DrawCommand::LineTo(self.fill_start));
++                true
++            } else {
++                self.cursor == self.fill_start
++            };
++            paths.push(DrawPath::Stroke {
++                style: &line.style,
++                commands,
++                is_closed,
++            })
++        }
++
++        let shape = DistilledShape {
++            paths,
++            shape_bounds: self.shape_bounds,
++            edge_bounds: self.edge_bounds,
++            id: 0,
++        };
++        match scale {
++            Some(scale) => renderer.register_shape_with_scale(shape, self, scale),
++            None => renderer.register_shape(shape, self),
++        }
+     }
+ 
++    /// FlashNX: tessellated at the scale it is drawn at, like a `Graphic`
++    /// (#137), so a `lineStyle(0)` keeps one screen pixel at any size. Upstream
++    /// draws drawings from the scale-1 handle, which `register_or_replace`
++    /// still makes for glyphs. A drawing redrawn every frame registers once
++    /// per frame, as before.
+     pub fn render(&self, context: &mut RenderContext) {
+-        if let Some(handle) = self.register_or_replace(context.renderer) {
+-            context
+-                .commands
+-                .render_shape(handle, context.transform_stack.transform());
++        if self.is_empty {
++            return;
+         }
++        let transform = context.transform_stack.transform();
++        let scale = render_scale(&transform.matrix);
++        let cached = self.scaled_handle.borrow_mut().find_near_and_touch(scale);
++        let handle = cached.unwrap_or_else(|| {
++            let handle = self.register(context.renderer, Some(scale));
++            self.scaled_handle.borrow_mut().insert(scale, handle.clone());
++            handle
++        });
++        context.commands.render_shape(handle, transform);
+     }
+ 
+     pub fn self_bounds(&self) -> Rectangle<Twips> {
 diff --git a/core/src/flashnx_as3prof.rs b/core/src/flashnx_as3prof.rs
 new file mode 100644
 index 000000000..0a3e04218
@@ -15503,6 +15853,31 @@ index 0b826d7c0..fa94d0771 100644
  
  #[derive(Error, Debug)]
  pub enum Error {
+diff --git a/core/src/tessellation_cache.rs b/core/src/tessellation_cache.rs
+index a9dc61f16..08b0a93bf 100644
+--- a/core/src/tessellation_cache.rs
++++ b/core/src/tessellation_cache.rs
+@@ -1,4 +1,20 @@
+ use ruffle_render::backend::ShapeHandle;
++use ruffle_render::matrix::Matrix;
++
++/// FlashNX: the scale a shape is drawn at under `matrix`, the one its mesh is
++/// tessellated for. Upstream measures it in `Graphic::render_self` only;
++/// drawings and morph shapes use it too here (#137). A degenerate or
++/// non-finite matrix gives 1, so it cannot retessellate on every frame.
++pub(crate) fn render_scale(matrix: &Matrix) -> f32 {
++    let scale_x = f32::abs(matrix.a + matrix.c);
++    let scale_y = f32::abs(matrix.b + matrix.d);
++    let scale = ((scale_x * scale_x + scale_y * scale_y) / 2.0).sqrt();
++    if scale.is_finite() && scale > 0.0 {
++        scale
++    } else {
++        1.0
++    }
++}
+ 
+ /// The scale ratio threshold beyond which a graphic or a drawing will be retessellated.
+ const RETESSELLATION_SCALE_THRESHOLD: f32 = 2.0;
 diff --git a/render/src/backend.rs b/render/src/backend.rs
 index 80ecf0517..001395fb7 100644
 --- a/render/src/backend.rs

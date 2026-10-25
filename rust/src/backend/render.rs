@@ -3522,6 +3522,10 @@ pub struct SwitchRenderBackend {
     /// Blends hold their copy, clear and composite to the box their group
     /// covers (`blend_region`). `blendrect.off` turns that off, to compare.
     blend_rect_on: bool,
+    /// Shapes are tessellated at the scale they are drawn at, so strokes keep
+    /// at least one screen pixel (#137). `strokescale.off` tessellates every
+    /// shape at 1, as before, to compare.
+    stroke_scale_on: bool,
     /// The one rectangle the next `render_commands_to_texture` clears (x, y,
     /// w, h in the target's own pixels), taken by that call. Set by a blend
     /// held to its box: the rest of its temp is never read.
@@ -7555,6 +7559,9 @@ impl SwitchRenderBackend {
         if marker_present("pausefreeze.off") {
             log(b"pause: pausefreeze.off present -> the pause draws the game again every frame\n\0");
         }
+        if marker_present("strokescale.off") {
+            log(b"shapes: strokescale.off present -> shapes tessellated at scale 1\n\0");
+        }
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
@@ -7795,6 +7802,7 @@ impl SwitchRenderBackend {
             offscreen_dims: None,
             offscreen_target_tex: None,
             blend_rect_on: !marker_present("blendrect.off"),
+            stroke_scale_on: !marker_present("strokescale.off"),
             offscreen_clear_rect: None,
             pause_freeze_on: !marker_present("pausefreeze.off"),
             pause_snap: None,
@@ -15187,6 +15195,22 @@ impl RenderBackend for SwitchRenderBackend {
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
+        self.register_shape_with_scale(shape, bitmap_source, 1.0)
+    }
+
+    /// `scale` is how big the shape is drawn on screen, so that a stroke keeps
+    /// at least one screen pixel (#137): tessellated at 1, a hairline in an
+    /// icon drawn at half size came out half a pixel wide and, with no MSAA
+    /// here, vanished or broke into dashes (the nets in Sports Heads: Football).
+    /// Ruffle asks again when a shape is drawn twice as big or as small as
+    /// its last mesh (`TessellationCache`), as for wgpu and WebGL.
+    fn register_shape_with_scale(
+        &mut self,
+        shape: DistilledShape,
+        bitmap_source: &dyn BitmapSource,
+        scale: f32,
+    ) -> ShapeHandle {
+        let scale = if self.stroke_scale_on { scale } else { 1.0 };
         let sb = &shape.shape_bounds;
         let bounds = (sb.x_min <= sb.x_max && sb.y_min <= sb.y_max).then(|| {
             [
@@ -15196,7 +15220,9 @@ impl RenderBackend for SwitchRenderBackend {
                 sb.y_max.to_pixels() as f32,
             ]
         });
-        let mesh = self.tessellator.tessellate_shape(shape, bitmap_source);
+        let mesh = self
+            .tessellator
+            .tessellate_shape_with_scale(shape, bitmap_source, scale);
 
         // Bake gradient textures first so per-draw can reference them.
         let mut gradient_textures: Vec<GLuint> = Vec::with_capacity(mesh.gradients.len());

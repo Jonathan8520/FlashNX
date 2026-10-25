@@ -198,14 +198,37 @@ Upstream registers every DefineShape with the renderer while the movie
 preloads, which decodes and uploads every bitmap its fills use, whether the
 shape is ever shown or not. Measured on Super Smash Flash 2 (`atlasIdle:`
 lines): 79 of 81 atlases (1 049 MB) held images never drawn once, and still
-553 MB after menus and a whole fight. `GraphicShared::render_handle` is now a
-`OnceCell` filled by `Graphic::base_handle` the first time `render_self` needs
+553 MB after menus and a whole fight. The first `render_self` now registers
 it, through the same `context.library` the re-tessellation path already
-used. Morph shapes, glyphs and drawings were already lazy. Result on SSF2:
+used (since #137, at the scale it is drawn at: see the next entry). Morph
+shapes, glyphs and drawings were already lazy. Result on SSF2:
 1-3 atlases in the menus instead of 81, 21 (281 MB) after three fights
 instead of 88 (1 193 MB), no bitmap refused, heap 1.6-2.1 GB instead of 3.0.
 Super Mario 63 unchanged to the eye, 60 fps, a few 40-58 ms frames where new
 areas first appear.
+
+**`core/src/tessellation_cache.rs`, `display_object/graphic.rs`,
+`display_object/morph_shape.rs`, `drawing.rs`: shapes tessellated at the
+scale they are drawn at (FlashNX #137).**
+
+Ruffle's tessellator gives a stroke at least one pixel at the scale it is
+given, and upstream (ruffle#23011) re-tessellates a `Graphic` when it is
+drawn twice as big or as small as its cached meshes, through
+`register_shape_with_scale`. The FlashNX GL backend did not implement that
+method, so the default one tessellated at 1: a hairline in an icon drawn at
+half size came out half a pixel wide and, with no MSAA in the GL backend,
+vanished or broke into dashes (the net of the goals in Sports Heads:
+Football). The backend now implements it, and FlashNX's `strokescale.off`
+marker tessellates at 1 again. Drawings and morph shapes, which upstream
+still tessellates at 1 (wgpu's MSAA hides it there), now go through the same
+`TessellationCache` and the shared `render_scale`, and the drawing's
+scale-1 handle is kept for glyphs only. A `Graphic` no longer registers a
+scale-1 handle before its scaled one either: lazily registered, that handle
+was a second copy of every shape drawn, meshes and gradient textures,
+since the first scaled lookup always misses. Only `lazyshape.off` still
+registers it, at preload, as upstream does. On the console: the nets are
+back, and Papa Louie 3 peaked at 17 + 8 MB of shape arena against the
+32 + 15 MB its earlier sessions had recorded, at its usual speed.
 
 **`core/src/display_object/movie_clip.rs`, `core/src/context.rs` — the
 movie's own script timeout.**
