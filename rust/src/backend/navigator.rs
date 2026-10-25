@@ -327,6 +327,10 @@ impl SidecarNavigator {
         if mirror_guards() && self.mirror_misses.borrow().contains(&miss_key) {
             return None;
         }
+        if mirror_guards() && is_profile_picture(resolved) {
+            tracing::info!("sidecar: {resolved} is a profile picture, not asked to the mirror");
+            return None;
+        }
         const CAP: usize = 16 * 1024 * 1024;
         // The same path under a few sibling hosts, because the archive keeps a
         // file under the host it was CAPTURED from, which is not always the host
@@ -735,8 +739,26 @@ fn is_tracker_host(host: &str) -> bool {
     TRACKERS.iter().any(is) || (mirror_guards() && LATER.iter().any(is))
 }
 
+/// A Facebook profile picture (`fbcdn` hosts, `/hprofile-...` paths, or the
+/// Graph API's `/picture`): the friends of the player who played the game in
+/// 2012, which no archive keeps. Dragon City asks for some fifty when it loads,
+/// each one three HTTPS misses on the mirror inside the frame: 153 misses and
+/// ~30 s of a loading frozen, the spinner and the pause with it (2026-10-25).
+/// Still looked for on the card first; only the mirror is not asked, and the
+/// game gets the same "not found" it got after the misses.
+fn is_profile_picture(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let path = url.path();
+    let fbcdn = host.ends_with("fbcdn.net") || host.starts_with("fbcdn-");
+    (fbcdn && path.contains("/hprofile"))
+        || (host == "graph.facebook.com" && path.ends_with("/picture"))
+}
+
 /// The two guards added on 2026-10-09 (Playtomic in the tracker list, and the
-/// memory of mirror misses), on unless `trackmirror.off`.
+/// memory of mirror misses), on unless `trackmirror.off`. The profile pictures
+/// (2026-10-25) too.
 static MIRROR_GUARDS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 pub fn set_mirror_guards(on: bool) {
