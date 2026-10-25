@@ -209,6 +209,10 @@ pub(crate) enum Screen {
     UpdateOffer { selection: usize, from: UpdFrom },
     UpdateWorking { from: UpdFrom },
     UpdateDone { selection: usize, from: UpdFrom },
+    /// Réglages > Bibliothèque > Jaquettes manquantes (`cover_sweep`): the
+    /// page looking for them, then the window saying how many were found.
+    CoverSweep,
+    CoverSweepDone,
     /// The Touches et curseur page (#20 regroup): everything controls-related
     /// for a game in one place. `selection` is a row of `menu::TouchesRow`:
     /// edit, apply, share, the revert row when `State::touches_can_revert`, then
@@ -397,6 +401,7 @@ fn drop_options_leftovers(s: &mut State, from: Screen) {
 mod options_panel;
 pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
 mod settings_tab;
+mod cover_sweep;
 pub(crate) use settings_tab::{menu_path, SetSection};
 use settings_tab::settings_at;
 mod update_flow;
@@ -2321,8 +2326,9 @@ pub const BUG_PICKER_VISIBLE_ROWS: usize = 8;
 
 /// Subfolders visible at once in the games folder browser, under its two
 /// pinned rows (`settings_dir_list`). The input side scrolls by it and lands
-/// on a folder just left with it, so all three read this one number.
-pub const GAMES_DIR_VISIBLE: usize = 7;
+/// on a folder just left with it, so all three read this one number. Six, so
+/// that what the folder is for fits under them on three lines.
+pub const GAMES_DIR_VISIBLE: usize = 6;
 
 // ── Setup / FFI helpers ───────────────────────────────────────────────────
 
@@ -4134,6 +4140,8 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::UpdateDone { selection, from } => {
             put!(selection, Screen::UpdateDone { selection: idx, from })
         }
+        // One button, Fermer: a tap on it closes the window.
+        Screen::CoverSweepDone => true,
         Screen::GamesDirPicker { selection, scroll } => {
             // Past the rows: the crumb and the column (`subpage_tap`).
             let rows = 1 + browse_parent(&s.dir_path).is_some() as usize + s.dir_browse.len();
@@ -5450,6 +5458,14 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::UpdateDone { selection, from } => {
             update_flow::done_input(&mut s, button, selection, from);
+            true
+        }
+        Screen::CoverSweep => {
+            cover_sweep::page_input(&mut s, button);
+            true
+        }
+        Screen::CoverSweepDone => {
+            cover_sweep::done_input(&mut s, button);
             true
         }
         Screen::TouchesMenu { game_idx, selection } => {
@@ -12378,6 +12394,7 @@ fn modal_kind(screen: Screen) -> u8 {
         // FlashNX's own update: its two windows (the download is a page).
         Screen::UpdateOffer { .. } => 28,
         Screen::UpdateDone { .. } => 29,
+        Screen::CoverSweepDone => 30,
         _ => 0,
     }
 }
@@ -13396,6 +13413,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         drive_pending_move();
         // FlashNX's own update: the check, its window, its download.
         update_flow::drive();
+        // The missing covers' page: what came back, the next requests.
+        cover_sweep::drive();
         net::set_wait_frame(None);
         WAIT_BACKEND.store(core::ptr::null_mut(), Ordering::Relaxed);
     }
@@ -13801,7 +13820,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
             settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, games_bytes, false);
         }
-        Screen::GamesDirConfirm { .. } | Screen::SettingsKeymapEditor | Screen::SendFailed { .. } => {
+        Screen::GamesDirConfirm { .. }
+        | Screen::SettingsKeymapEditor
+        | Screen::SendFailed { .. }
+        | Screen::CoverSweepDone => {
             // A window over the tab: the page stays behind it, still, dimmed by
             // the window's scrim, so B is seen to land where it was. Drawn
             // outside the window's pop and with no touch table of its own.
@@ -13821,6 +13843,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     settings_tab::draw_move_question(backend, selection, &dir_path, game_count);
                 }
                 Screen::SendFailed { selection, .. } => settings_tab::draw_send_failed(backend, selection),
+                Screen::CoverSweepDone => cover_sweep::draw_done(backend),
                 // The editor edits the global default: the keymap module was
                 // pointed there on entry.
                 _ => menu::draw(backend, now),
@@ -13837,6 +13860,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             update_flow::draw_window(backend, screen);
         }
         Screen::UpdateWorking { .. } => update_flow::draw_page(backend),
+        Screen::CoverSweep => cover_sweep::draw_page(backend),
         Screen::GamesDirMoving => {
             // Drawn for every frame of the move: where from, where to, and a
             // real count, not a spinner that says only "something is

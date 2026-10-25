@@ -768,7 +768,7 @@ impl SwitchRenderBackend {
     /// The folder browser inside the pane: its first `pinned` rows (use this
     /// folder, go up) held above the listing with a hairline under them, the
     /// listing scrolling below. `key` is the list's glide key, new for every
-    /// folder.
+    /// folder. Returns the foot of the rows on screen.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn settings_dir_list(
         &mut self,
@@ -779,7 +779,7 @@ impl SwitchRenderBackend {
         pinned: usize,
         visible: usize,
         key: u32,
-    ) {
+    ) -> f32 {
         let scrolls = rows.len() > visible;
         let spec = ScrollRows {
             x: PANE_X,
@@ -800,6 +800,7 @@ impl SwitchRenderBackend {
             let ly = (top + pinned as f32 * LIST_ROW_H).round();
             self.draw_overlay_rect(x + 12.0, ly, w - 24.0, 1.0, col::LINE);
         }
+        top + rows.len().min(visible) as f32 * LIST_ROW_H
     }
 
     /// A bug report's game list inside the pane: each game's cover, its name

@@ -82,7 +82,7 @@ impl SetSection {
 // The rows of each section, in the order they are drawn. Matched by name,
 // never by number: every screen that comes back to the tab lands on the row
 // that opened it through these names.
-const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "SONS"];
+const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "JAQUETTES", "SONS"];
 // The game defaults in the order of the pause and of a game's options (the
 // controls, the picture as their ÉCRAN page lists it, the performance).
 const DEFAULTS_ROWS: &[&str] =
@@ -280,6 +280,8 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
                 *g = s.dir_path.clone();
             }
         }
+        // The games without a cover, looked for on Flashpoint (`cover_sweep`).
+        (SetSection::Library, "JAQUETTES") => cover_sweep::start(s),
         (SetSection::Library, "SONS") => {
             // A switch. Turning them on is heard at once: the press's click
             // (`sfx::after_input`) plays after the switch.
@@ -921,6 +923,11 @@ pub(crate) fn draw_settings(
             Body::Section { in_pane: true, row: row_of(SetSection::Defaults, "TOUCHES") },
         ),
         Screen::SendFailed { row, .. } => (SetSection::Help, false, Body::Section { in_pane: true, row }),
+        Screen::CoverSweepDone => (
+            SetSection::Library,
+            false,
+            Body::Section { in_pane: true, row: row_of(SetSection::Library, "JAQUETTES") },
+        ),
         _ => return,
     };
     // The value the armed row shows (`Armed`), drawn in place of the stored
@@ -1057,9 +1064,12 @@ pub(crate) fn menu_path(steps: &[&str]) -> std::string::String {
     steps.join("\u{a0}\u{a0}\u{203A}\u{a0}\u{a0}")
 }
 
-/// Bibliothèque: the home layouts as cards, the games folder, the interface
-/// sounds, each with what it is for underneath. `view_focus` is the card the
-/// cursor is on when it is not the layout in use.
+/// Bibliothèque: the home layouts as cards, the games folder, what it holds
+/// and how many of its games have no cover, the interface sounds. What the
+/// folder is for is said on its own page (`folders_page`), where there is
+/// room: here it pushed the sounds' note off the foot of the pane once the
+/// covers' row came. `view_focus` is the card the cursor is on when it is not
+/// the layout in use.
 fn library_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
@@ -1090,19 +1100,25 @@ fn library_pane(
     let folder = [Row::new(Icon::Folder, u.row_games_dir).value(shown_path(&root)).opens()];
     let (c, y, _) = b.settings_block(y + 8.0, &folder, on_row("DOSSIER"), glide);
     cells.extend(c);
-    let y = b.settings_note(y + 8.0, u.help_games_dir, 3);
     // What the folder holds: its games, and the room they take on the card
     // (each game's file, or its file and companion folder as measured when it
-    // was downloaded). Read only: the cursor passes it by. The count used to
-    // end the note above, where three lines of help often cut it off.
+    // was downloaded). Read only: the cursor passes it by. Under it, the games
+    // without a cover, which A looks for on Flashpoint; greyed out when there
+    // are none, and A then says so.
     let (count, bytes) = held;
     let amount = if bytes > 0 {
         std::format!("{}  \u{00B7}  {}", crate::loc_ui::games(count), crate::backend::render::imp_size(bytes))
     } else {
         crate::loc_ui::games(count)
     };
-    let stats = [Row::new(Icon::HardDrive, u.row_games_held).value(&amount)];
-    let (_, y, _) = b.settings_block(y + 14.0, &stats, None, glide);
+    let missing = cover_sweep::missing_count();
+    let lacking = if missing == 0 { u.cov_none.to_string() } else { crate::loc_ui::games(missing) };
+    let stats = [
+        Row::new(Icon::HardDrive, u.row_games_held).value(&amount),
+        Row::new(Icon::Image, u.row_missing_covers).value(&lacking).dim(missing == 0),
+    ];
+    let (c, y, _) = b.settings_block(y + 14.0, &stats, on_row("JAQUETTES").map(|_| 1), glide);
+    cells.extend(c.into_iter().skip(1));
     let on = crate::loc::ui_sounds();
     let sounds = [Row::new(if on { Icon::Volume } else { Icon::VolumeOff }, u.row_sounds).toggle(on)];
     let (c, y, sg) = b.settings_block(y + 18.0, &sounds, on_row("SONS"), glide);
@@ -1116,6 +1132,8 @@ fn library_pane(
         Some("VUE") if card == Some(in_use) => std::vec![(&[Btn::B][..], u.back)],
         Some("VUE") => std::vec![(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)],
         Some("DOSSIER") => std::vec![(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)],
+        Some("JAQUETTES") if missing == 0 => std::vec![(&[Btn::B][..], u.back)],
+        Some("JAQUETTES") => std::vec![(&[Btn::A][..], u.cov_find), (&[Btn::B][..], u.back)],
         Some(_) => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
         None => std::vec::Vec::new(),
     };
@@ -1548,7 +1566,8 @@ fn quit_pane(b: &mut SwitchRenderBackend) {
 
 /// Bibliothèque > Dossier des jeux: the card one level at a time, inside the
 /// pane. "Use this folder" and "Parent folder" act on the folder shown, so
-/// they stay put while the listing under them scrolls.
+/// they stay put while the listing under them scrolls. Under the listing,
+/// what the folder is for, moved here from the Bibliothèque pane.
 fn folders_page(
     b: &mut SwitchRenderBackend,
     folder: (&str, &[std::string::String]),
@@ -1601,7 +1620,8 @@ fn folders_page(
         key = key.wrapping_mul(16777619);
     }
     let key = 0x8000_0000 | (key & 0x00FF_FFFF);
-    b.settings_dir_list(top, &rows, selection, scroll, pinned, pinned + GAMES_DIR_VISIBLE, key);
+    let foot = b.settings_dir_list(top, &rows, selection, scroll, pinned, pinned + GAMES_DIR_VISIBLE, key);
+    b.settings_note(foot + 12.0, u.help_games_dir, 3);
     let dim = rows.get(selection).is_none_or(|r| r.dim);
     let a_verb = if dim {
         None

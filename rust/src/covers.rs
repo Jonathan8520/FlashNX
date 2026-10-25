@@ -535,29 +535,48 @@ pub fn fetch_url_and_cache(
         }
         Err(e) => return Err(e),
     };
-    // Decoded BEFORE it is written. HTTP 200 says a body arrived, not that it is
-    // a picture: a mirror's error page, an HTML redirect or a truncated transfer
-    // all land here. Once written the file exists, so `resolve` returns it for
-    // ever, the two draw paths map the decode failure straight to the generated
-    // default with no log, and the log line says "cached" — the opposite of what
-    // happened. Retrying does exactly the same thing. Failing here instead puts
-    // the message on screen, where the cover flow already knows how to show it.
-    if decode_bytes(&bytes).is_none() {
-        crate::net::log(&std::format!(
-            "covers: {} returned {} bytes that are not a decodable image\n",
-            cover_url,
-            bytes.len(),
-        ));
-        return Err(std::string::String::from("not an image"));
+    let path = cache_bytes(basename, &bytes).map_err(|e| {
+        crate::net::log(&std::format!("covers: {} -> {}\n", cover_url, e));
+        e
+    })?;
+    crate::sd::commit();
+    Ok(path)
+}
+
+/// Cache downloaded `bytes` as `basename`'s cover, once they are known to be a
+/// picture. The caller commits the card (one commit for a whole batch).
+///
+/// Decoded BEFORE it is written. HTTP 200 says a body arrived, not that it is
+/// a picture: a mirror's error page, an HTML redirect or a truncated transfer
+/// all land here. Once written the file exists, so `resolve` returns it for
+/// ever, the two draw paths map the decode failure straight to the generated
+/// default with no log, and the log line says "cached" — the opposite of what
+/// happened. Retrying does exactly the same thing. Failing here instead puts
+/// the message on screen, where the cover flow already knows how to show it.
+pub fn cache_bytes(basename: &str, bytes: &[u8]) -> Result<std::string::String, std::string::String> {
+    if decode_bytes(bytes).is_none() {
+        return Err(std::format!("{} bytes that are not a decodable image", bytes.len()));
     }
     let _ = std::fs::create_dir_all(cover_cache_dir());
     let path = cache_path(basename);
-    std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;
+    std::fs::write(&path, bytes).map_err(|e| std::format!("write cover: {}", e))?;
     // Cached after the scan listed `covers/` — tell the index, or `resolve` would
     // keep reporting this game as cover-less for the rest of the session.
     crate::library::note_file_created(&path);
-    crate::sd::commit();
+    bump_generation();
     Ok(path)
+}
+
+/// Bumped whenever a cover file is written or removed in the app, so a count
+/// of the games without one knows to be taken again (`generation`).
+static GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn bump_generation() {
+    GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn generation() -> u32 {
+    GENERATION.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Remove the cover files tied to a game on delete that the C++ dir scan can't
@@ -591,6 +610,9 @@ pub fn remove_for(basename: &str) -> u32 {
                 removed += 1;
             }
         }
+    }
+    if removed > 0 {
+        bump_generation();
     }
     removed
 }

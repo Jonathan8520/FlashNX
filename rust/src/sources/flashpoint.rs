@@ -221,3 +221,77 @@ pub fn search(
     }
     Ok(out)
 }
+
+/// How many games the search for a missing cover asks for: the route's most.
+/// An answer holding fewer than all its hits cannot say a title is unique.
+pub const SURE_MATCH_LIMIT: usize = 100;
+
+/// The search a missing cover is looked for with: every word of `name`.
+pub fn sure_match_url(name: &str) -> Option<std::string::String> {
+    let words = query_words(name);
+    (!words.is_empty()).then(|| api_url(&words, SURE_MATCH_LIMIT, false, false))
+}
+
+/// A title as titles are compared: its letters and digits, case aside, so
+/// "Super Mario 63", "super-mario-63" and "Super_Mario_63" are one title.
+fn title_key(title: &str) -> std::string::String {
+    title.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The one game of the route's answer `json` (to `sure_match_url(name)`) whose
+/// title, or one of whose other titles, is `name`: the sure match a missing
+/// cover is taken from without asking (Réglages > Bibliothèque). None when no
+/// game matches, when several do, or when the answer does not hold every hit:
+/// "Snake" is the title of several games, and a cover picked among them would
+/// be a guess. Several matching games are narrowed to the Flash ones, then to
+/// the games among animations, and only a single one left is taken.
+pub fn sure_match(json: &[u8], name: &str) -> Option<std::string::String> {
+    let key = title_key(name);
+    if key.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let games = api_games(&json)?;
+    let total = json.get("total").and_then(|t| t.as_u64()).unwrap_or(u64::MAX);
+    if total > games.len() as u64 {
+        return None;
+    }
+    let field = |g: &serde_json::Value, k: &str| g.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut hits: std::vec::Vec<&serde_json::Value> = games
+        .iter()
+        .filter(|g| {
+            let alt = field(g, "alternateTitles");
+            !field(g, "id").is_empty()
+                && (title_key(&field(g, "title")) == key || alt.split(';').any(|a| title_key(a) == key))
+        })
+        .collect();
+    for (k, want) in [("primaryPlatform", "Flash"), ("library", "arcade")] {
+        if hits.len() > 1 && hits.iter().any(|g| field(g, k) == want) {
+            hits.retain(|g| field(g, k) == want);
+        }
+    }
+    match hits.as_slice() {
+        [one] => Some(field(one, "id")),
+        _ => None,
+    }
+}
+
+/// The Flashpoint id in the address a game was downloaded from (its `.url`
+/// sidecar): a GameZIP is `<id>-<ms>.zip` on the archive's own server. None
+/// for any other address, an htdocs mirror path included.
+pub fn id_in_source_url(url: &str) -> Option<std::string::String> {
+    let url = url.trim();
+    let host = url.split("://").nth(1)?.split('/').next()?;
+    if !host.ends_with("unstable.life") {
+        return None;
+    }
+    let b = url.as_bytes();
+    (0..b.len().saturating_sub(35)).find_map(|i| {
+        let s = &b[i..i + 36];
+        let ok = s.iter().enumerate().all(|(j, c)| match j {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        });
+        ok.then(|| url[i..i + 36].to_ascii_lowercase())
+    })
+}

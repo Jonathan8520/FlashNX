@@ -7,6 +7,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 ### Added
 
 - **A spinner while a game loads.** A game can hold the screen for many seconds while it computes or loads its files, with nothing moving, not even the cursor, which looked like a crash (Super Mario Bros. Crossover's white screen, Dragon City's loadings). After a second of it, a spinner now turns in a corner until the game shows its next picture. It can stop for a moment while one large file is read.
+- **Settings › Library › Missing covers finds a cover for every game that has none**, for a player who lost the covers folder. A game downloaded from Flashpoint is found by its id; any other game by its name, and only when exactly one game of the archive has that title (or that other title): "Snake", the title of several games, is left for the player to choose. The search runs with a bar and a count, B stops it, and a cover already there is never replaced. What the games folder is for is now said on its own page, under the list of folders.
 - **Sound that games make while they play** (#136). A game can compute its sound in ActionScript instead of playing recorded files (`SampleDataEvent`); FlashNX had no support for it, so such games were silent. Super Mario Bros. Crossover makes all its music and sound effects this way: they play now.
 
 ### Performance
