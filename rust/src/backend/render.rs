@@ -3008,6 +3008,8 @@ struct BitmapProgram {
     /// 0 = straight alpha (atlas, launcher art), 1 = premultiplied (standalone
     /// cache / filter / `BitmapData.draw` textures). See `BITMAP_FRAG`.
     u_premult: GLint,
+    /// 1 = sharp bilinear (`Sampling::crisp`). See `BITMAP_FRAG`.
+    u_crisp: GLint,
 }
 
 struct GradientProgram {
@@ -3038,6 +3040,8 @@ struct ShapeBitmapProgram {
     /// branch works in. See the doc comment on `SHAPE_BITMAP_VERT`.
     u_uv_inset: GLint,
     u_wrap_mode: GLint,
+    /// 1 = sharp bilinear (`Sampling::crisp`). See `SHAPE_BITMAP_FRAG`.
+    u_crisp: GLint,
 }
 
 impl Drop for SolidProgram {
@@ -3266,6 +3270,10 @@ struct GlStateCache {
     /// straight-alpha, so the handful of standalone draws are the only ones
     /// that ever reach the driver with this.
     last_premult: Cell<i32>,
+    /// Mirrors of `u_crisp` in the bitmap and shape-bitmap programs: one value
+    /// per program, since a uniform belongs to its program.
+    last_crisp_bitmap: Cell<i32>,
+    last_crisp_shape: Cell<i32>,
     last_vao: Cell<GLuint>,
     /// Sampler object on texture unit 0. 0 means "none", so GL falls back to
     /// the texture's own parameters — which are LINEAR + CLAMP_TO_EDGE for
@@ -3287,6 +3295,8 @@ impl GlStateCache {
         self.last_texture.set(0);
         self.last_wrap_mode.set(-1);
         self.last_premult.set(-1);
+        self.last_crisp_bitmap.set(-1);
+        self.last_crisp_shape.set(-1);
         self.last_vao.set(0);
         // Not just forgotten: released. Every invalidate marks a hand-off to raw
         // GL, and a point sampler left on unit 0 would follow whoever runs next.
@@ -3348,6 +3358,17 @@ impl GlStateCache {
         }
     }
 
+    /// `u_crisp` of the program `last` mirrors (`last_crisp_bitmap` or
+    /// `last_crisp_shape`). Changes only when the Pixels row is NETS and a run
+    /// of SWF bitmaps meets launcher art, a few times a frame at most.
+    fn set_crisp(&self, last: &Cell<i32>, location: GLint, crisp: bool) {
+        let v = i32::from(crisp);
+        if last.get() != v {
+            unsafe { glUniform1i(location, v) };
+            last.set(v);
+        }
+    }
+
     fn bind_vao(&self, vao: GLuint) {
         if self.last_vao.get() != vao {
             unsafe { glBindVertexArray(vao) };
@@ -3369,7 +3390,7 @@ pub struct SwitchRenderBackend {
     gl_state: GlStateCache,
 
     /// Point-sampling sampler object, bound on unit 0 for the draws that ask for
-    /// it (see `sampler_for`). 0 if `glGenSamplers` failed, which simply leaves
+    /// it (see `sampling_for`). 0 if `glGenSamplers` failed, which simply leaves
     /// every draw on the texture's LINEAR, i.e. the old picture.
     sampler_sharp: GLuint,
 
@@ -3855,6 +3876,14 @@ void main() {\n\
 ///
 /// The branch is uniform across a draw, so it costs a predicated jump and
 /// nothing else — which matters, since this is the hottest fragment shader here.
+///
+/// `u_crisp` is the Pixels row's NETS (see `Sampling`): the texture is read
+/// LINEAR, but each sample is moved to the centre of its texel, except within
+/// half a screen pixel of a seam between two texels, where it slides from one
+/// centre to the next. Every texel comes out a flat square of the same size at
+/// any scale, its edge blended over one screen pixel ("sharp bilinear"); at a
+/// whole scale the seams fall between screen pixels and it is plain NEAREST.
+/// The clamp keeps the samples inside the slot, off the atlas pad.
 const BITMAP_FRAG: &[u8] = b"#version 330 core\n\
 in vec2 v_uv;\n\
 out vec4 frag_color;\n\
@@ -3862,8 +3891,19 @@ uniform sampler2D u_tex;\n\
 uniform vec4 u_mult;\n\
 uniform vec4 u_add;\n\
 uniform int u_premult;\n\
+uniform int u_crisp;\n\
+uniform vec4 u_uv_remap;\n\
 void main() {\n\
-    vec4 c = texture(u_tex, v_uv);\n\
+    vec2 uv = v_uv;\n\
+    if (u_crisp != 0) {\n\
+        vec2 size = vec2(textureSize(u_tex, 0));\n\
+        vec2 t = uv * size;\n\
+        vec2 seam = floor(t + 0.5);\n\
+        t = seam + clamp((t - seam) / max(fwidth(t), vec2(1e-4)), -0.5, 0.5);\n\
+        vec2 half_texel = 0.5 / size;\n\
+        uv = clamp(t / size, u_uv_remap.xy + half_texel, u_uv_remap.xy + u_uv_remap.zw - half_texel);\n\
+    }\n\
+    vec4 c = texture(u_tex, uv);\n\
     if (u_premult == 0) {\n\
         frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
     } else if (c.a > 0.0) {\n\
@@ -3924,6 +3964,10 @@ void main() {\n\
     v_uv_local = uv.xy;\n\
 }\n\0";
 
+/// `u_crisp`: same sharp bilinear as `BITMAP_FRAG`, on the bitmap's own texel
+/// grid (the slot's size in atlas texels) and BEFORE the wrap, so the screen
+/// derivative is taken on the unwrapped UV and never sees the jump of `fract`
+/// at a repeating fill's seam.
 const SHAPE_BITMAP_FRAG: &[u8] = b"#version 330 core\n\
 in vec2 v_uv_local;\n\
 out vec4 frag_color;\n\
@@ -3933,8 +3977,17 @@ uniform vec4 u_add;\n\
 uniform vec4 u_uv_remap;\n\
 uniform vec2 u_uv_inset;\n\
 uniform int u_wrap_mode;\n\
+uniform int u_crisp;\n\
 void main() {\n\
-    vec2 local = (u_wrap_mode == 1) ? fract(v_uv_local) : clamp(v_uv_local, u_uv_inset, 1.0 - u_uv_inset);\n\
+    vec2 lp = v_uv_local;\n\
+    if (u_crisp != 0) {\n\
+        vec2 size = u_uv_remap.zw * vec2(textureSize(u_tex, 0));\n\
+        vec2 t = lp * size;\n\
+        vec2 seam = floor(t + 0.5);\n\
+        t = seam + clamp((t - seam) / max(fwidth(t), vec2(1e-4)), -0.5, 0.5);\n\
+        lp = t / size;\n\
+    }\n\
+    vec2 local = (u_wrap_mode == 1) ? fract(lp) : clamp(lp, u_uv_inset, 1.0 - u_uv_inset);\n\
     vec2 atlas_uv = u_uv_remap.xy + local * u_uv_remap.zw;\n\
     vec4 c = texture(u_tex, atlas_uv);\n\
     frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
@@ -4050,6 +4103,21 @@ pub fn pixel_filter() -> u8 {
 pub const TEXTURE_FILTER_AUTO: u8 = 0;
 pub const TEXTURE_FILTER_SMOOTH: u8 = 1;
 pub const TEXTURE_FILTER_SHARP: u8 = 2;
+
+/// How a bitmap draw samples its texture, chosen by `sampling_for`.
+#[derive(Clone, Copy)]
+struct Sampling {
+    /// Sampler object for texture unit 0: `sampler_sharp` to point-sample, or 0
+    /// for the texture's own LINEAR.
+    sampler: GLuint,
+    /// Sharp bilinear: LINEAR, with the shader moving each sample to its texel
+    /// centre except at the seams (`BITMAP_FRAG`). Needs `sampler` 0.
+    crisp: bool,
+}
+
+/// The texture's own LINEAR, untouched: SMOOTH, AUTO on a smoothed bitmap, and
+/// every non-SWF draw (launcher art, cache passes).
+const LINEAR_SAMPLING: Sampling = Sampling { sampler: 0, crisp: false };
 
 // The three constants above name the VALUES of `PIXEL_FILTER`, declared just
 // under it. There was briefly a second atomic here holding the same setting, and
@@ -4823,6 +4891,7 @@ fn build_bitmap_program() -> Option<BitmapProgram> {
         u_tex: loc(program, b"u_tex\0"),
         u_uv_remap: loc(program, b"u_uv_remap\0"),
         u_premult: loc(program, b"u_premult\0"),
+        u_crisp: loc(program, b"u_crisp\0"),
         program,
     })
 }
@@ -4838,6 +4907,7 @@ fn build_shape_bitmap_program() -> Option<ShapeBitmapProgram> {
         u_uv_remap: loc(program, b"u_uv_remap\0"),
         u_uv_inset: loc(program, b"u_uv_inset\0"),
         u_wrap_mode: loc(program, b"u_wrap_mode\0"),
+        u_crisp: loc(program, b"u_crisp\0"),
         program,
     })
 }
@@ -7589,7 +7659,7 @@ impl SwitchRenderBackend {
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
         // One sampler object for point sampling, bound per draw (see
-        // `sampler_for`). It has to be a sampler and not texture parameters,
+        // `sampling_for`). It has to be a sampler and not texture parameters,
         // because the bitmaps that want it share a 2048 atlas with bitmaps that
         // do not: one texture object, hundreds of bitmaps, nowhere to put a
         // per-bitmap filter. glTexParameteri around each draw was the other
@@ -9297,7 +9367,7 @@ impl SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap, 0, true);
+        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap, LINEAR_SAMPLING, true);
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         set_blend();
@@ -9501,26 +9571,27 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The sampler a SWF bitmap draw should use: `sampler_sharp` to point-sample,
-    /// or 0 to keep the texture's LINEAR.
+    /// How a SWF bitmap draw should sample: `sampler_sharp` to point-sample,
+    /// LINEAR (sampler 0), or LINEAR moved to texel centres (`crisp`).
     ///
     /// `smoothing` is Ruffle's per-bitmap flag, which a pixel-art SWF sets false
-    /// on purpose and which this backend used to discard. Returning 0 rather
-    /// than a second "smooth" sampler object is deliberate: the SMOOTH path then
-    /// issues no sampler state at all and is byte-for-byte what shipped before,
-    /// and a failed `glGenSamplers` degrades to that same old picture instead of
-    /// to a black one.
-    fn sampler_for(&self, smoothing: bool) -> GLuint {
-        let sharp = match pixel_filter() {
-            TEXTURE_FILTER_SMOOTH => false,
-            TEXTURE_FILTER_SHARP => true,
+    /// on purpose and which this backend used to discard. AUTO follows it with
+    /// plain NEAREST, which is what Flash Player does. NETS is sharp bilinear
+    /// instead: blown up by a scale that is not a whole number (Papa Louie 3's
+    /// 700x416 at x1.73), NEAREST gives some texels one screen pixel and others
+    /// two, an uneven staircase, while sharp bilinear keeps them all the same
+    /// size with one blended pixel at each seam, and is NEAREST again at a whole
+    /// scale. Sampler 0 rather than a second "smooth" sampler object is
+    /// deliberate: the SMOOTH path then issues no sampler state at all and is
+    /// byte-for-byte what shipped before, and a failed `glGenSamplers` degrades
+    /// to that same old picture instead of to a black one.
+    fn sampling_for(&self, smoothing: bool) -> Sampling {
+        match pixel_filter() {
+            TEXTURE_FILTER_SMOOTH => LINEAR_SAMPLING,
+            TEXTURE_FILTER_SHARP => Sampling { sampler: 0, crisp: true },
             // TEXTURE_FILTER_AUTO, and anything unknown: what the SWF asked for.
-            TEXTURE_FILTER_AUTO | _ => !smoothing,
-        };
-        if sharp {
-            self.sampler_sharp
-        } else {
-            0
+            TEXTURE_FILTER_AUTO | _ if smoothing => LINEAR_SAMPLING,
+            _ => Sampling { sampler: self.sampler_sharp, crisp: false },
         }
     }
 
@@ -9536,19 +9607,25 @@ impl SwitchRenderBackend {
         add: &[f32; 4],
         tex: GLuint,
         uv_remap: &[f32; 4],
-        sampler_obj: GLuint,
+        sampling: Sampling,
         premult: bool,
     ) {
         // Sampler UNIFORM (u_tex = 0) set once at program link; no per-draw
-        // glUniform1i(u_tex) needed here. `sampler_obj` is the unrelated sampler
-        // OBJECT, and it is a per-draw choice on purpose: this one helper draws
-        // SWF bitmaps out of a shared atlas AND launcher art (banner, covers,
-        // glyph runs) out of its own textures, and only the first kind may ever
-        // be point-sampled. Non-SWF callers pass 0 and keep LINEAR.
+        // glUniform1i(u_tex) needed here. `sampling.sampler` is the unrelated
+        // sampler OBJECT, and it is a per-draw choice on purpose: this one helper
+        // draws SWF bitmaps out of a shared atlas AND launcher art (banner,
+        // covers, glyph runs) out of its own textures, and only the first kind
+        // may ever be point-sampled or made crisp. Non-SWF callers pass
+        // `LINEAR_SAMPLING`.
         self.gl_state.use_program(self.bitmap_prog.program);
         self.gl_state.bind_texture_unit0(tex);
-        self.gl_state.bind_sampler(sampler_obj);
+        self.gl_state.bind_sampler(sampling.sampler);
         self.gl_state.set_premult(self.bitmap_prog.u_premult, premult);
+        self.gl_state.set_crisp(
+            &self.gl_state.last_crisp_bitmap,
+            self.bitmap_prog.u_crisp,
+            sampling.crisp,
+        );
         unsafe {
             glUniformMatrix3fv(self.bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
@@ -9570,7 +9647,7 @@ impl SwitchRenderBackend {
         uv_remap: &[f32; 4],
         uv_inset: &[f32; 2],
         is_repeating: bool,
-        sampler_obj: GLuint,
+        sampling: Sampling,
     ) {
         // Atlas texture parameters are STILL set once at atlas creation; no per-
         // draw glTexParameteri (avoids per-frame state churn that bisection
@@ -9585,7 +9662,12 @@ impl SwitchRenderBackend {
         // draw out of the same atlas usually wants the other filter.
         self.gl_state.use_program(self.shape_bitmap_prog.program);
         self.gl_state.bind_texture_unit0(tex);
-        self.gl_state.bind_sampler(sampler_obj);
+        self.gl_state.bind_sampler(sampling.sampler);
+        self.gl_state.set_crisp(
+            &self.gl_state.last_crisp_shape,
+            self.shape_bitmap_prog.u_crisp,
+            sampling.crisp,
+        );
         // u_wrap_mode: 0 = clamp (default for non-repeating fills),
         // 1 = fract (for tile/repeat fills like Mario 63 ground).
         self.gl_state.set_wrap_mode(
@@ -10351,7 +10433,7 @@ impl SwitchRenderBackend {
         ];
         const NO_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         const PASSTHROUGH_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV, 0, false);
+        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV, LINEAR_SAMPLING, false);
         self.gl_state.bind_vao(self.atlas_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
@@ -12200,7 +12282,7 @@ impl SwitchRenderBackend {
         let mult = [1.0, 1.0, 1.0, 1.0];
         let add = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, LINEAR_SAMPLING, false);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -16887,7 +16969,7 @@ impl CommandHandler for SwitchRenderBackend {
             self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
             // A cacheAsBitmap or filter result is still a Bitmap as far as the
             // movie is concerned, and Flash filtered it by the same flag, so it
-            // goes through `sampler_for` like any other bitmap. It needs no UV
+            // goes through `sampling_for` like any other bitmap. It needs no UV
             // inset: it owns its texture and CLAMP_TO_EDGE already keeps a
             // NEAREST sample inside it.
             // `premult = true`: this texture holds premultiplied alpha, so the
@@ -16896,7 +16978,7 @@ impl CommandHandler for SwitchRenderBackend {
             // on the whole quad — the grey rectangle around Mario 63's meteors.
             // See the `BITMAP_FRAG` doc comment.
             self.use_bitmap(
-                &world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing), true,
+                &world, &mult, &add, tex, &uv_remap, self.sampling_for(smoothing), true,
             );
             self.gl_state.bind_vao(self.bitmap_vao);
             self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
@@ -16980,7 +17062,7 @@ impl CommandHandler for SwitchRenderBackend {
         // is already the Flash formula here and the straight-alpha blend below
         // supplies the coverage. Nothing to undo.
         self.use_bitmap(
-            &world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing), false,
+            &world, &mult, &add, tex, &uv_remap, self.sampling_for(smoothing), false,
         );
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
@@ -17141,7 +17223,7 @@ impl CommandHandler for SwitchRenderBackend {
                         &remap,
                         uv_inset,
                         *is_repeating,
-                        self.sampler_for(*is_smoothed),
+                        self.sampling_for(*is_smoothed),
                     );
                 }
             }
