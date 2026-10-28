@@ -32,6 +32,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 - **Thin lines no longer vanish** (#137). A line thinner than a pixel on screen disappeared or broke into dashes: the nets of the goals were missing from Sports Heads: Football's instructions. Shapes are now drawn for the size they appear at on screen, so a line keeps at least one pixel, as in Flash.
 - **Games that decompress themselves on their loading screen now start.** Some games ship packed inside a small loader, apparat's Matryoshka, that decompresses them in ActionScript: Ruffle never reached the end, stopped the script after 60 seconds and the game stayed on its loading screen for good (Glorg stayed on "decrunching"). FlashNX now decompresses them itself, in a second or two.
 - **Flashpoint games already on the card are recognized again in Import.** Since v2.0.2, a game from Flashpoint's older collection (one with no game ZIP, such as Gravity Duck) lost its "on your card" check mark in the results, the shelves and the details window, and A downloaded it a second time as "Title (Studio)". It is recognized again, and A plays it.
+- **A Flashpoint game whose file is missing from the archive now says so** (#138). Powerpuff Girls Z: Super Mix Z's main file is gone from Flashpoint's server: the download stopped on "Not found (404). The address is wrong, or the page was removed." It now says the file is missing from Flashpoint's server, without offering to try again.
 
 ## v2.0.2 (2026-10-21)
 

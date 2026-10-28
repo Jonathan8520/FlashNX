@@ -13183,7 +13183,17 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
                             .clone()
                             .filter(|t| !t.trim().is_empty())
                             .unwrap_or_else(|| pretty_name(&s.download_file_name));
-                        import_error(&mut s, ErrKind::Download, &f.msg, f.retry, &name);
+                        // A loose game's 404 that its own address could not
+                        // make up for: the archive lacks the file itself
+                        // (Powerpuff Girls Z: Super Mix Z's game.swf, #138).
+                        // Said as such, with no retry: asking again finds the
+                        // same hole, where the generic 404 blamed the address.
+                        if s.download_fp_direct && net::last_http_code() == 404 {
+                            let msg = crate::loc_ui::ui().imp_err_fp_missing;
+                            import_error(&mut s, ErrKind::Download, msg, false, &name);
+                        } else {
+                            import_error(&mut s, ErrKind::Download, &f.msg, f.retry, &name);
+                        }
                     }
                 }
             }
