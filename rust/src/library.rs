@@ -11097,10 +11097,14 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
 
 /// The file a Flashpoint game is (or would be) saved under: its title, unless
 /// a game of that title from another Flashpoint id is on the card (two
-/// "Sonny" in the archive, #131). The other one's `.url` (written for bug
-/// reports) holds its GameZIP address, which carries its id; then this one
-/// goes under its title and first studio. No `.url` (an older import, a file
-/// copied by hand): taken as this game, as before.
+/// "Sonny" in the archive, #131); then this one goes under its title and first
+/// studio. The other one's `.url` (written for bug reports) says which game it
+/// is: a GameZIP address carries the id, a loose game's is the htdocs mirror
+/// address of its launchCommand, or the launchCommand itself after a mirror
+/// 404. Only the id was compared, so every loose game on the card read as
+/// another game: no check mark, and A downloaded it again as "Gravity Duck
+/// (Woblyware).swf". No `.url` (an older import, a file copied by hand): taken
+/// as this game, as before.
 fn fp_local_name_uncached(entries: &[Entry], cand: &crate::sources::flashpoint::CatalogEntry) -> std::string::String {
     let name = crate::sources::gamezip::swf_filename(&cand.title);
     let Some(e) = entries.iter().find(|e| e.basename == name) else {
@@ -11109,7 +11113,14 @@ fn fp_local_name_uncached(entries: &[Entry], cand: &crate::sources::flashpoint::
     let url_path = std::format!("{}.url", e.path);
     let source = crate::backend::navigator::read_sidecar_file(std::path::Path::new(&url_path)).unwrap_or_default();
     let source = std::string::String::from_utf8_lossy(&source);
-    if source.trim().is_empty() || cand.id.is_empty() || source.contains(cand.id.as_str()) {
+    let source = source.trim();
+    if source.is_empty() || cand.id.is_empty() || source.contains(cand.id.as_str()) {
+        return name;
+    }
+    let command = crate::sources::gamezip::unquote(&cand.launch_command);
+    if source == command
+        || crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command).is_some_and(|u| u == source)
+    {
         return name;
     }
     let studio = cand
