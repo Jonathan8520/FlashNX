@@ -7389,19 +7389,35 @@ index 57ca11ff3..842bd6416 100644
  pub fn apply_filter<'gc>(
      activation: &mut Activation<'_, 'gc>,
 diff --git a/core/src/avm2/globals/flash/display/display_object.rs b/core/src/avm2/globals/flash/display/display_object.rs
-index 16b2c8f84..9bd8fc80d 100644
+index 16b2c8f84..703cff22e 100644
 --- a/core/src/avm2/globals/flash/display/display_object.rs
 +++ b/core/src/avm2/globals/flash/display/display_object.rs
-@@ -49,6 +49,8 @@ pub fn initialize_for_allocator<'gc>(
+@@ -48,7 +48,23 @@ pub fn initialize_for_allocator<'gc>(
+     // and consequently are observed to have their currentFrame lag one
      // frame behind objects placed by the timeline (even if they were
      // both placed in the same frame to begin with).
-     dobj.base().set_skip_next_enter_frame(true);
+-    dobj.base().set_skip_next_enter_frame(true);
++    //
++    // FlashNX (#138): in a SWF 9 movie, Flash Player 32 skips it for the
++    // object alone; the children its timeline placed advance on that
++    // enterFrame, and their frame 1 scripts never run. Powerpuff Girls Z:
++    // Super Mix Z builds its interface with `new` in a click handler, under
++    // layers made with `new Sprite()` in the same handler: the countdown
++    // child was at frame 2 on the next enterFrame in Flash Player (traced on
++    // the debug projector), while here it stayed on frame 1, ran its
++    // `stop()` and never dispatched the event that starts the level. SWF 10+
++    // keeps the skip on the children (avm2/avm2_catchup_dobj).
++    if dobj.swf_version() <= 9 {
++        dobj.base().set_skip_next_enter_frame_self_only();
++    } else {
++        dobj.base().set_skip_next_enter_frame(true);
++    }
 +    // FlashNX: the next enter_frame must visit it to consume the flag.
 +    crate::display_object::mark_enter_needed(dobj);
      dobj.on_construction_complete(context);
  
      obj
-@@ -863,7 +865,7 @@ pub fn set_blend_mode<'gc>(
+@@ -863,7 +879,7 @@ pub fn set_blend_mode<'gc>(
      Ok(Value::Undefined)
  }
  
@@ -11375,7 +11391,7 @@ index 0926945e0..64f389702 100644
          self.audio_manager
              .stop_sounds_with_handle(self.audio, sound)
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..1f25a8e48 100644
+index 2e6e01783..e1a2ca5c7 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -11425,10 +11441,25 @@ index 2e6e01783..1f25a8e48 100644
              cell: RefCell::new(DisplayObjectBaseMut {
                  filters: Default::default(),
                  blend_shader: None,
-@@ -683,6 +698,24 @@ impl<'gc> DisplayObjectBase<'gc> {
-         self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
-     }
+@@ -681,6 +696,37 @@ impl<'gc> DisplayObjectBase<'gc> {
  
+     pub fn set_skip_next_enter_frame(&self, skip: bool) {
+         self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
++        // FlashNX: any other skip (a goto's, a parent's) reaches the children.
++        self.set_flag(DisplayObjectFlags::SKIP_ENTER_FRAME_SELF_ONLY, false);
++    }
++
++    /// FlashNX: skip the next `enter_frame` of this object only, without
++    /// passing the skip on to its children (see `SKIP_ENTER_FRAME_SELF_ONLY`).
++    pub fn set_skip_next_enter_frame_self_only(&self) {
++        self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, true);
++        self.set_flag(DisplayObjectFlags::SKIP_ENTER_FRAME_SELF_ONLY, true);
++    }
++
++    pub fn skip_next_enter_frame_self_only(&self) -> bool {
++        self.contains_flag(DisplayObjectFlags::SKIP_ENTER_FRAME_SELF_ONLY)
++    }
++
 +    /// FlashNX: see `DisplayObjectFlags::LIFECYCLE_DIRTY`.
 +    pub fn lifecycle_dirty(&self) -> bool {
 +        self.contains_flag(DisplayObjectFlags::LIFECYCLE_DIRTY)
@@ -11445,12 +11476,10 @@ index 2e6e01783..1f25a8e48 100644
 +
 +    pub fn set_enter_quiet(&self, value: bool) {
 +        self.set_flag(DisplayObjectFlags::ENTER_QUIET, value);
-+    }
-+
-     fn set_avm1_removed(&self, value: bool) {
-         self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
      }
-@@ -931,6 +964,261 @@ struct DrawCacheInfo {
+ 
+     fn set_avm1_removed(&self, value: bool) {
+@@ -931,6 +977,261 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
@@ -11712,7 +11741,7 @@ index 2e6e01783..1f25a8e48 100644
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -953,7 +1241,18 @@ pub fn render_base<'gc>(
+@@ -953,7 +1254,18 @@ pub fn render_base<'gc>(
          None
      };
  
@@ -11732,7 +11761,7 @@ index 2e6e01783..1f25a8e48 100644
          let mut cache_info: Option<DrawCacheInfo> = None;
          let base_transform = context.transform_stack.transform();
          let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
-@@ -1873,6 +2172,11 @@ pub trait TDisplayObject<'gc>:
+@@ -1873,6 +2185,11 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
@@ -11744,7 +11773,7 @@ index 2e6e01783..1f25a8e48 100644
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2393,11 +2697,19 @@ pub trait TDisplayObject<'gc>:
+@@ -2393,11 +2710,19 @@ pub trait TDisplayObject<'gc>:
  
      /// Run any frame scripts (if they exist and this object needs to run them).
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -11764,7 +11793,7 @@ index 2e6e01783..1f25a8e48 100644
      }
  
      /// Called before the child is about to be rendered.
-@@ -2585,6 +2897,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2910,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -11783,7 +11812,7 @@ index 2e6e01783..1f25a8e48 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2928,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2941,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -11797,7 +11826,7 @@ index 2e6e01783..1f25a8e48 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3326,20 @@ bitflags! {
+@@ -2995,6 +3339,26 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -11815,10 +11844,16 @@ index 2e6e01783..1f25a8e48 100644
 +        /// top of the tree by `mark_lifecycle_dirty` and `mark_enter_needed`.
 +        /// A walk passes over such a subtree (`skip_quiet_child`).
 +        const ENTER_QUIET             = 1 << 18;
++
++        /// FlashNX: the `SKIP_NEXT_ENTER_FRAME` of an object constructed from
++        /// ActionScript in a SWF 9 movie, which Flash Player applies to that
++        /// object only, not to the children its timeline placed. See
++        /// `initialize_for_allocator`.
++        const SKIP_ENTER_FRAME_SELF_ONLY = 1 << 19;
      }
  }
  
-@@ -3232,3 +3577,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3596,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -12239,7 +12274,7 @@ index c4f4a8880..a16dedb62 100644
              bounds,
          }
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..891e9aba8 100644
+index baa4a03c5..2457831b2 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -12726,22 +12761,28 @@ index baa4a03c5..891e9aba8 100644
  }
  
  impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
-@@ -2519,8 +2776,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2519,9 +2776,19 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
  
      fn enter_frame(self, context: &mut UpdateContext<'gc>) {
          let skip_frame = self.base().should_skip_next_enter_frame();
++        // FlashNX (#138): a SWF 9 object constructed from ActionScript skips
++        // alone (`SKIP_ENTER_FRAME_SELF_ONLY`); its children take this
++        // enterFrame like any other.
++        let skip_children = skip_frame && !self.base().skip_next_enter_frame_self_only();
 +        // FlashNX: whether every child's subtree is quiet after this walk.
 +        let mut children_quiet = true;
          //Child removals from looping gotos appear to resolve in reverse order.
          for child in self.iter_render_list().rev() {
+-            if skip_frame {
 +            // FlashNX: a quiet subtree has nothing to do (`ENTER_QUIET`).
-+            if !skip_frame && crate::display_object::skip_quiet_child(child) {
++            if !skip_children && crate::display_object::skip_quiet_child(child) {
 +                continue;
 +            }
-             if skip_frame {
++            if skip_children {
                  // If we're skipping our current frame, then we want to skip it for our children
                  // as well. This counts as the skipped frame for any children that already
-@@ -2535,10 +2798,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+                 // has this set to true (e.g. a third-level grandchild doesn't skip three frames).
+@@ -2535,10 +2802,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                  child.base().set_skip_next_enter_frame(true);
              }
              child.enter_frame(context);
@@ -12754,7 +12795,7 @@ index baa4a03c5..891e9aba8 100644
              return;
          }
  
-@@ -2554,6 +2819,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2554,6 +2823,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
              // after tags have executed.
              let data = self.0.shared.get().swf.clone();
              let place_actions = self.unqueue_filtered(|q| q.unqueue_add());
@@ -12762,7 +12803,7 @@ index baa4a03c5..891e9aba8 100644
  
              for (_, tag) in place_actions {
                  let mut reader = data.read_from(tag.tag_start);
-@@ -2566,11 +2832,26 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2566,11 +2836,26 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      tracing::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
                  }
              }
@@ -12789,7 +12830,7 @@ index baa4a03c5..891e9aba8 100644
          // AVM1 code expects to execute in line with timeline instructions, so
          // it's exempted from frame construction.
          if self.movie().is_action_script_3()
-@@ -2601,6 +2882,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2601,6 +2886,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      .0
                      .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
                  for child in self.iter_render_list() {
@@ -12800,7 +12841,7 @@ index baa4a03c5..891e9aba8 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2920,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,11 +2924,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -12821,7 +12862,7 @@ index baa4a03c5..891e9aba8 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3019,6 +3313,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+@@ -3019,6 +3317,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                              result = None;
                          }
                      }
@@ -12846,7 +12887,7 @@ index baa4a03c5..891e9aba8 100644
                  } else if result.is_none() {
                      if let Some(child) = child.as_interactive() {
                          result = if !child.as_displayobject().movie().is_action_script_3() {
-@@ -3437,14 +3749,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3753,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -12865,7 +12906,7 @@ index baa4a03c5..891e9aba8 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3875,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3879,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -12887,7 +12928,7 @@ index baa4a03c5..891e9aba8 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3906,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3910,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -12897,7 +12938,7 @@ index baa4a03c5..891e9aba8 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3930,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3934,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -12909,7 +12950,7 @@ index baa4a03c5..891e9aba8 100644
                  width,
                  height,
              }),
-@@ -3842,7 +4161,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +4165,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -12919,7 +12960,7 @@ index baa4a03c5..891e9aba8 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4288,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4292,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -12959,7 +13000,7 @@ index baa4a03c5..891e9aba8 100644
  
          Ok(())
      }
-@@ -4937,7 +5281,7 @@ pub enum QueuedTagAction {
+@@ -4937,7 +5285,7 @@ pub enum QueuedTagAction {
  bitflags! {
      /// Boolean state flags used by `MovieClip`.
      #[derive(Clone, Copy)]
@@ -12968,7 +13009,7 @@ index baa4a03c5..891e9aba8 100644
          /// Whether this `MovieClip` has run its initial frame.
          const INITIALIZED             = 1 << 0;
  
-@@ -4968,6 +5312,17 @@ bitflags! {
+@@ -4968,6 +5316,17 @@ bitflags! {
  
          /// Whether the AVM2 constructor of this `MovieClip` threw an error.
          const AVM2_CONSTRUCTOR_FAILED = 1 << 7;

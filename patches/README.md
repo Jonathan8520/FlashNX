@@ -434,6 +434,38 @@ Menu/init()` before, its menu class started and no script error after. The
 ordering in the new tests' `output.txt` is inferred from those Flash outputs,
 not generated under Flash.
 
+**`core/src/display_object.rs`, `display_object/movie_clip.rs`,
+`avm2/globals/flash/display/display_object.rs`: in SWF 9, an object made from
+ActionScript skips its first enterFrame alone (FlashNX #138).**
+
+An object constructed from ActionScript skips its next enterFrame
+(`initialize_for_allocator`), and since upstream `6bf17158c` (2023, Jacksmith)
+`MovieClip::enter_frame` passes the skip on to every child, so a clip its
+timeline placed stays on frame 1 one frame longer and runs its frame 1 script
+then. That holds in SWF 10+ (`avm2/avm2_catchup_dobj`, version 43), not in
+SWF 9. Powerpuff Girls Z: Super Mix Z (SWF 9) builds its interface in a click
+handler, `new` Sprite layers then `new gui`, and calls `play()` on the gui's
+`numbers` countdown, whose frame 1 script is `stop()` and frame 73 dispatches
+the event that starts the level. Here `numbers` stayed on frame 1, its `stop()`
+ran after the `play()`, no bubble ever came, in FlashNX and on ruffle.rs alike.
+
+Measured on Flash Player 32 (the debug projector, traces in `flashlog.txt`,
+game instrumented with FFDec): `numbers` is on frame 2 at the first enterFrame
+after the click and its frame 1 script never runs at start, with the `play()`
+and without it; a 35-frame clip made with `new` in the same handler is on
+frame 1, then 2: the object skips, its timeline children do not. Neither the
+goto in between (no script ran in it, frame 1 at every step) nor the `play()`
+explains it. Shumway's SWF9 model would have stalled the same way.
+
+`DisplayObjectFlags::SKIP_ENTER_FRAME_SELF_ONLY`, set with the skip by
+`set_skip_next_enter_frame_self_only()` when `swf_version() <= 9`, and cleared
+by any other `set_skip_next_enter_frame` (a goto's skip, a parent's, the end of
+the skip): `enter_frame` then walks the children as on any frame. SWF 10+,
+SWF 9 gotos and `LoaderDisplay` keep passing the skip down, nothing measured
+says otherwise. Full suite: 4071 passed, the 2 failures already there
+(`avm1/movieclip_hittest`, `avm2/stage3d_rotating_cube`). On the console the
+countdown runs and level 1 plays at 60 fps.
+
 **`core/src/loader.rs`, `avm2/object/loaderinfo_object.rs`: the URL of an
 ActionScript 3 movie loaded with `Loader.loadBytes` (FlashNX #130, backport of
 upstream ruffle#24025, `09efa268d`, plus the effect of `f8509a30f`).**
