@@ -14022,18 +14022,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         c.cover_url.clone(),
                         if c.id.is_empty() { std::string::String::new() } else { crate::sources::discover::screenshot_url(&c.id) },
                         c.description.clone(),
+                        c.id.clone(),
                         s.entries.iter().any(|e| e.basename == name),
                         pending,
                         studio,
                     )
                 })
             });
-            if let Some((title, dev, publisher, release, cover, shot, desc, installed, pending, studio)) = snap {
+            if let Some((title, dev, publisher, release, cover, shot, desc, id, installed, pending, studio)) = snap {
                 // X's translation: asked for here when it is on, and not while
                 // a search of the page behind is on its way (the request would
                 // cancel it).
                 let searching = LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(true);
-                if let Some(msg) = crate::translate::drive(Some(&desc), !searching) {
+                if let Some(msg) = crate::translate::drive(Some((&id, &desc)), !searching) {
                     if let Ok(mut s) = LIBRARY.lock() {
                         set_toast(&mut s, msg, TOAST_ERR);
                     }

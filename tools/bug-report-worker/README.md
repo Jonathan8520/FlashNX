@@ -66,20 +66,28 @@ in the app's language. It runs on **Workers AI** (`@cf/google/gemma-4-26b-a4b-it
 `PROFILES_KV` under `tr:` keys for 180 days, so a description is translated once
 for everybody.
 
+- **Only real Flashpoint descriptions.** The app sends the game's id with its
+  description; before a new translation the Worker reads that game's
+  description from Flashpoint's search and answers 403 if the text differs.
+  So the route cannot be used as a free LLM. A cached translation is served
+  without the check (it was checked when it was made).
 - The Worker needs the **`AI` binding**. `wrangler deploy` reads it from
   `wrangler.toml`. From the dashboard: the Worker → Settings → Bindings → Add →
   Workers AI, variable name `AI`.
+- **Rate limit** (`TRANSLATE_LIMIT`): 20 new translations a minute per address.
+  Only `wrangler deploy` sets it: the dashboard does not show rate-limit
+  bindings. Without it the route still works, with no limit.
 - Cost: about 15 Neurons per new translation. The free plan gives 10,000 a day
   (reset at 00:00 UTC), so roughly 650 new descriptions a day; past that the
   route answers 502 until the reset, and the app says the translation is
   unavailable. Cached ones cost nothing.
 - To change the model (Cloudflare retires them), edit `TRANSLATE_MODEL`: no new
-  app build is needed. Bump the `tr:1:` prefix to drop the old translations.
+  app build is needed. Bump `TRANSLATE_CACHE` to drop the old translations.
 
 ```sh
 curl -X POST "$WORKER_URL/translate" -H "Content-Type: application/json" \
-  -d '{"text":"Jump, run and fight your way through 40 levels.","lang":"fr"}'
-# -> {"ok":true,"text":"Sautez, courez et combattez à travers 40 niveaux."}
+  -d '{"id":"1a17d483-7bc8-412e-bfad-f2d4ae272856","text":"<the game'"'"'s originalDescription>","lang":"fr"}'
+# -> {"ok":true,"text":"..."}; any other text -> 403
 ```
 
 ## Deploy order (Worker first)

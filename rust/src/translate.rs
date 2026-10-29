@@ -273,13 +273,16 @@ struct Answer {
     text: std::string::String,
 }
 
-/// Once a frame while a details window is up, with its description, and from
-/// the page behind it (`None`), which collects an answer still on its way
-/// after the window closed. Starts the request the window needs when
-/// translation is on and `can_start` (no search of the page in flight on the
-/// same thread, which a new request would cancel). Returns the message of a
-/// failure, for a toast: translation is off again by then.
-pub(crate) fn drive(text: Option<&str>, can_start: bool) -> Option<std::string::String> {
+/// Once a frame while a details window is up, with its game's Flashpoint id
+/// and description, and from the page behind it (`None`), which collects an
+/// answer still on its way after the window closed. Starts the request the
+/// window needs when translation is on and `can_start` (no search of the page
+/// in flight on the same thread, which a new request would cancel). Returns
+/// the message of a failure, for a toast: translation is off again by then.
+///
+/// The relay translates a text only once it has checked with Flashpoint that
+/// it is that game's description, hence the id.
+pub(crate) fn drive(game: Option<(&str, &str)>, can_start: bool) -> Option<std::string::String> {
     let mut t = TR.lock().ok()?;
     if t.job != 0 {
         match net::tick_post_async(t.job, 64 * 1024) {
@@ -313,7 +316,8 @@ pub(crate) fn drive(text: Option<&str>, can_start: bool) -> Option<std::string::
             None => t.job = 0,
         }
     }
-    let text = text?.trim();
+    let (id, text) = game?;
+    let text = text.trim();
     if !t.on || !can_start || !offered(&mut t, text) {
         return None;
     }
@@ -322,7 +326,7 @@ pub(crate) fn drive(text: Option<&str>, can_start: bool) -> Option<std::string::
     if t.cache.iter().any(|(ck, _)| *ck == k) || (t.job != 0 && t.job_key == k) {
         return None;
     }
-    let body = serde_json::json!({ "text": text, "lang": lang }).to_string();
+    let body = serde_json::json!({ "id": id, "text": text, "lang": lang }).to_string();
     match net::start_post_async(ENDPOINT, &body) {
         Ok(id) => {
             net::log(&std::format!("translate: {} chars into {}\n", text.chars().count(), lang));

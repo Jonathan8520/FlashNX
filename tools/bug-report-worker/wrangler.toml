@@ -18,3 +18,14 @@ id = "7e2c8186f131443595b13be6c22f5aa9"
 # Its translations are cached in PROFILES_KV under "tr:" keys.
 [ai]
 binding = "AI"
+
+# /translate: new translations (cache misses) per address, 20 a minute in each
+# Cloudflare location. Only `wrangler deploy` sets it (the dashboard does not
+# show rate limits); without it the route works, unlimited.
+[[ratelimits]]
+name = "TRANSLATE_LIMIT"
+namespace_id = "2026"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
