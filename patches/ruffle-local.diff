@@ -12190,7 +12190,7 @@ index 0926945e0..64f389702 100644
          self.audio_manager
              .stop_sounds_with_handle(self.audio, sound)
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..e1a2ca5c7 100644
+index 2e6e01783..0e3163618 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -12278,7 +12278,7 @@ index 2e6e01783..e1a2ca5c7 100644
      }
  
      fn set_avm1_removed(&self, value: bool) {
-@@ -931,6 +977,261 @@ struct DrawCacheInfo {
+@@ -931,6 +977,286 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
@@ -12537,10 +12537,51 @@ index 2e6e01783..e1a2ca5c7 100644
 +    FLASHNX_MASK_FIXES.load(std::sync::atomic::Ordering::Relaxed)
 +}
 +
++/// FlashNX (#139): see its use in `render_base`. The bounds test comes
++/// before the children count, which reads one more allocation.
++fn flashnx_leaf_off_screen<'gc>(this: DisplayObject<'gc>, context: &RenderContext<'_, 'gc>) -> bool {
++    if context.is_offscreen || !crate::drawing::leaf_cull() {
++        return false;
++    }
++    let Some(mc) = this.as_movie_clip() else {
++        return false;
++    };
++    if this.blend_mode() != ExtendedBlendMode::Normal
++        || this.scroll_rect().is_some()
++        || this.masker().is_some()
++        || this.opaque_background().is_some()
++        || this.is_bitmap_cached()
++    {
++        return false;
++    }
++    let own = this.base().matrix();
++    let Some(drawing) = mc.drawing() else {
++        return false;
++    };
++    drawing.leaf_off_screen(context, &context.transform_stack.transform().matrix, &own)
++        && mc.num_children() == 0
++}
++
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -953,7 +1254,18 @@ pub fn render_base<'gc>(
+@@ -941,6 +1267,15 @@ pub fn render_base<'gc>(
+         return;
+     }
+ 
++    // FlashNX (#139): a sprite whose drawing cannot reach the screen and
++    // which has nothing else to draw: no children, and none of what draws
++    // beyond its drawing or changes how it is drawn (bitmap cache and so
++    // filters, mask, scrollRect, opaque background, blend mode).
++    if options.apply_transform && options.apply_matrix && flashnx_leaf_off_screen(this, context) {
++        crate::drawing::Drawing::note_leaf_culled();
++        return;
++    }
++
+     if options.apply_transform {
+         let transform = this.base().transform(options.apply_matrix);
+         context.transform_stack.push(&transform);
+@@ -953,7 +1288,18 @@ pub fn render_base<'gc>(
          None
      };
  
@@ -12560,7 +12601,7 @@ index 2e6e01783..e1a2ca5c7 100644
          let mut cache_info: Option<DrawCacheInfo> = None;
          let base_transform = context.transform_stack.transform();
          let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
-@@ -1873,6 +2185,11 @@ pub trait TDisplayObject<'gc>:
+@@ -1873,6 +2219,11 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
@@ -12572,7 +12613,7 @@ index 2e6e01783..e1a2ca5c7 100644
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2393,11 +2710,19 @@ pub trait TDisplayObject<'gc>:
+@@ -2393,11 +2744,19 @@ pub trait TDisplayObject<'gc>:
  
      /// Run any frame scripts (if they exist and this object needs to run them).
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -12592,7 +12633,7 @@ index 2e6e01783..e1a2ca5c7 100644
      }
  
      /// Called before the child is about to be rendered.
-@@ -2585,6 +2910,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2944,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -12611,7 +12652,7 @@ index 2e6e01783..e1a2ca5c7 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2941,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2975,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -12625,7 +12666,7 @@ index 2e6e01783..e1a2ca5c7 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3339,26 @@ bitflags! {
+@@ -2995,6 +3373,26 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -12652,7 +12693,7 @@ index 2e6e01783..e1a2ca5c7 100644
      }
  }
  
-@@ -3232,3 +3596,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3630,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -13889,10 +13930,10 @@ index 7c7047526..45fe4f773 100644
          context: &mut UpdateContext<'gc>,
          swf: Arc<SwfMovie>,
 diff --git a/core/src/drawing.rs b/core/src/drawing.rs
-index 6a87ca93d..2b05bc54f 100644
+index 6a87ca93d..b017b5708 100644
 --- a/core/src/drawing.rs
 +++ b/core/src/drawing.rs
-@@ -1,18 +1,47 @@
+@@ -1,18 +1,63 @@
  use crate::context::RenderContext;
 +use crate::tessellation_cache::{TessellationCache, render_scale};
  use ruffle_render::backend::{RenderBackend, ShapeHandle};
@@ -13918,11 +13959,27 @@ index 6a87ca93d..2b05bc54f 100644
 +    SPRITE_CULL.store(enabled, Ordering::Relaxed);
 +}
 +
-+/// Sprite drawings drawn and left out off screen since the last call.
-+pub fn take_sprite_cull_stats() -> (u64, u64) {
++/// FlashNX: whether a sprite with nothing to draw but an off-screen drawing
++/// is left out before its transform is even pushed (`render_base`, #139).
++/// Off from FlashNX's `leafcull.off` marker, to compare.
++static LEAF_CULL: AtomicBool = AtomicBool::new(true);
++static LEAF_CULLED: AtomicU64 = AtomicU64::new(0);
++
++pub fn set_leaf_cull(enabled: bool) {
++    LEAF_CULL.store(enabled, Ordering::Relaxed);
++}
++
++pub fn leaf_cull() -> bool {
++    LEAF_CULL.load(Ordering::Relaxed) && SPRITE_CULL.load(Ordering::Relaxed)
++}
++
++/// Sprite drawings drawn, left out off screen, and left out with their
++/// whole sprite (`leaf_cull`), since the last call.
++pub fn take_sprite_cull_stats() -> (u64, u64, u64) {
 +    (
 +        SPRITE_DRAWN.swap(0, Ordering::Relaxed),
 +        SPRITE_CULLED.swap(0, Ordering::Relaxed),
++        LEAF_CULLED.swap(0, Ordering::Relaxed),
 +    )
 +}
 +
@@ -13941,7 +13998,7 @@ index 6a87ca93d..2b05bc54f 100644
      paths: Vec<DrawingPath>,
      bitmaps: Vec<BitmapInfo>,
      current_fill: Option<DrawingFill>,
-@@ -35,8 +64,10 @@ impl Drawing {
+@@ -35,8 +80,10 @@ impl Drawing {
      pub fn new() -> Self {
          Self {
              render_handle: OnceCell::new(),
@@ -13952,7 +14009,7 @@ index 6a87ca93d..2b05bc54f 100644
              paths: Vec::new(),
              bitmaps: Vec::new(),
              current_fill: None,
-@@ -52,8 +83,10 @@ impl Drawing {
+@@ -52,8 +99,10 @@ impl Drawing {
      pub fn from_swf_shape(shape: &swf::Shape) -> Self {
          let mut this = Self {
              render_handle: OnceCell::new(),
@@ -13963,7 +14020,7 @@ index 6a87ca93d..2b05bc54f 100644
              paths: Vec::new(),
              bitmaps: Vec::new(),
              current_fill: None,
-@@ -107,6 +140,7 @@ impl Drawing {
+@@ -107,6 +156,7 @@ impl Drawing {
      fn mark_dirty(&mut self) {
          self.is_empty = false;
          self.render_handle.take();
@@ -13971,7 +14028,7 @@ index 6a87ca93d..2b05bc54f 100644
      }
  
      /// Set fill style and reset fill rule to default.
-@@ -157,12 +191,14 @@ impl Drawing {
+@@ -157,12 +207,14 @@ impl Drawing {
          self.bitmaps.clear();
          self.edge_bounds = Default::default();
          self.shape_bounds = Default::default();
@@ -13986,7 +14043,7 @@ index 6a87ca93d..2b05bc54f 100644
      }
  
      pub fn set_line_style(&mut self, style: Option<LineStyle>) {
-@@ -175,6 +211,9 @@ impl Drawing {
+@@ -175,6 +227,9 @@ impl Drawing {
              }
          }
          if let Some(style) = style {
@@ -13996,7 +14053,7 @@ index 6a87ca93d..2b05bc54f 100644
              self.current_line = Some(DrawingLine {
                  style,
                  commands: vec![DrawCommand::MoveTo(self.cursor)],
-@@ -245,84 +284,149 @@ impl Drawing {
+@@ -245,86 +300,181 @@ impl Drawing {
              return None;
          }
  
@@ -14093,28 +14150,13 @@ index 6a87ca93d..2b05bc54f 100644
 +                winding_rule: fill.rule,
 +            })
 +        }
-+
-+        for line in &self.pending_lines {
-+            let mut commands = line.commands.to_owned();
-+            let is_closed = if self.current_fill.is_some() {
-+                commands.push(DrawCommand::LineTo(self.fill_start));
-+                true
-+            } else {
-+                self.cursor == self.fill_start
-+            };
-+            paths.push(DrawPath::Stroke {
-+                style: &line.style,
-+                commands,
-+                is_closed,
-+            })
-+        }
  
 -            let shape = DistilledShape {
 -                paths,
 -                shape_bounds: self.shape_bounds,
 -                edge_bounds: self.edge_bounds,
 -                id: 0,
-+        if let Some(line) = &self.current_line {
++        for line in &self.pending_lines {
 +            let mut commands = line.commands.to_owned();
 +            let is_closed = if self.current_fill.is_some() {
 +                commands.push(DrawCommand::LineTo(self.fill_start));
@@ -14132,6 +14174,21 @@ index 6a87ca93d..2b05bc54f 100644
 +        }
  
 -        Some(handle.clone())
++        if let Some(line) = &self.current_line {
++            let mut commands = line.commands.to_owned();
++            let is_closed = if self.current_fill.is_some() {
++                commands.push(DrawCommand::LineTo(self.fill_start));
++                true
++            } else {
++                self.cursor == self.fill_start
++            };
++            paths.push(DrawPath::Stroke {
++                style: &line.style,
++                commands,
++                is_closed,
++            })
++        }
++
 +        let shape = DistilledShape {
 +            paths,
 +            shape_bounds: self.shape_bounds,
@@ -14182,45 +14239,94 @@ index 6a87ca93d..2b05bc54f 100644
 +    /// would hide a drawing that is on screen. A non-finite transform is never
 +    /// left out here: the backend decides what to do with it.
 +    pub fn reaches_screen(&self, context: &RenderContext) -> bool {
-+        if context.is_offscreen
-+            || !SPRITE_CULL.load(Ordering::Relaxed)
-+            || !self.shape_bounds.is_valid()
-+        {
++        if context.is_offscreen || !SPRITE_CULL.load(Ordering::Relaxed) {
 +            return true;
++        }
++        match self.off_screen(context, m64(&context.transform_stack.transform().matrix)) {
++            Some(true) => {
++                SPRITE_CULLED.fetch_add(1, Ordering::Relaxed);
++                false
++            }
++            Some(false) => {
++                SPRITE_DRAWN.fetch_add(1, Ordering::Relaxed);
++                true
++            }
++            None => true,
+         }
+     }
+ 
++    /// FlashNX (#139): `reaches_screen` for a sprite whose own transform `own`
++    /// is not pushed yet, under `parent`: `render_base` leaves out a sprite
++    /// with nothing else to draw when this is false, before the work of
++    /// pushing its transform and walking its (empty) children, ~2 us a sprite
++    /// on the console that `reaches_screen` alone did not save.
++    pub fn leaf_off_screen(&self, context: &RenderContext, parent: &Matrix, own: &Matrix) -> bool {
++        if context.is_offscreen || !leaf_cull() {
++            return false;
++        }
++        self.off_screen(context, mul64(m64(parent), m64(own))) == Some(true)
++    }
++
++    /// A sprite left out by `leaf_off_screen`, for the `cull:` line.
++    pub fn note_leaf_culled() {
++        LEAF_CULLED.fetch_add(1, Ordering::Relaxed);
++    }
++
++    /// Whether this drawing through `m` (viewport space) misses the visible
++    /// stage; `None` when that cannot be told (no bounds, a non-finite
++    /// transform: `f64::min` skips NaN, so a NaN one comes out as infinite
++    /// bounds), and the drawing is drawn.
++    fn off_screen(&self, context: &RenderContext, m: [f64; 6]) -> Option<bool> {
++        if !self.shape_bounds.is_valid() {
++            return None;
 +        }
 +        let stage = context.stage;
 +        let viewport = stage.viewport_matrix();
-+        let view = transformed_bounds(&viewport, &stage.view_bounds());
-+        let bounds = transformed_bounds(&context.transform_stack.transform().matrix, &self.shape_bounds);
-+        // `f64::min` skips NaN, so a NaN transform comes out as infinite bounds.
++        let view = transformed_bounds(m64(&viewport), &stage.view_bounds());
++        let bounds = transformed_bounds(m, &self.shape_bounds);
 +        if !bounds.iter().chain(&view).all(|v| v.is_finite()) {
-+            return true;
-         }
++            return None;
++        }
 +        // Two pixels for hairlines and the one-pixel minimum our tessellator
 +        // gives thin strokes (#137), plus a scale-proof stroke's full width.
 +        let scale = (viewport.a.abs().max(viewport.d.abs())) as f64;
 +        let margin = 40.0 + self.unscaled_stroke.get() as f64 * scale;
-+        let off = bounds[0] > view[2] + margin
-+            || bounds[2] < view[0] - margin
-+            || bounds[1] > view[3] + margin
-+            || bounds[3] < view[1] - margin;
-+        if off {
-+            SPRITE_CULLED.fetch_add(1, Ordering::Relaxed);
-+        } else {
-+            SPRITE_DRAWN.fetch_add(1, Ordering::Relaxed);
-+        }
-+        !off
-     }
- 
++        Some(
++            bounds[0] > view[2] + margin
++                || bounds[2] < view[0] - margin
++                || bounds[1] > view[3] + margin
++                || bounds[3] < view[1] - margin,
++        )
++    }
++
      pub fn self_bounds(&self) -> Rectangle<Twips> {
-@@ -449,6 +553,20 @@ enum DrawingPath {
+         self.shape_bounds
+     }
+@@ -449,6 +599,37 @@ enum DrawingPath {
      Line(DrawingLine),
  }
  
-+/// `[x_min, y_min, x_max, y_max]` of `rect` through `matrix`, in f64 twips.
-+fn transformed_bounds(matrix: &Matrix, rect: &Rectangle<Twips>) -> [f64; 4] {
-+    let (a, b, c, d) = (matrix.a as f64, matrix.b as f64, matrix.c as f64, matrix.d as f64);
-+    let (tx, ty) = (matrix.tx.get() as f64, matrix.ty.get() as f64);
++/// `[a, b, c, d, tx, ty]` of `m` in f64 (twips for tx, ty).
++fn m64(m: &Matrix) -> [f64; 6] {
++    [m.a as f64, m.b as f64, m.c as f64, m.d as f64, m.tx.get() as f64, m.ty.get() as f64]
++}
++
++/// `p * c` (`c` first, then `p`), as `TransformStack::push` combines them,
++/// without its rounding and wrapping into i32 twips.
++fn mul64(p: [f64; 6], c: [f64; 6]) -> [f64; 6] {
++    [
++        p[0] * c[0] + p[2] * c[1],
++        p[1] * c[0] + p[3] * c[1],
++        p[0] * c[2] + p[2] * c[3],
++        p[1] * c[2] + p[3] * c[3],
++        p[0] * c[4] + p[2] * c[5] + p[4],
++        p[1] * c[4] + p[3] * c[5] + p[5],
++    ]
++}
++
++/// `[x_min, y_min, x_max, y_max]` of `rect` through `m`, in f64 twips.
++fn transformed_bounds(m: [f64; 6], rect: &Rectangle<Twips>) -> [f64; 4] {
++    let [a, b, c, d, tx, ty] = m;
 +    let mut out = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
 +    for x in [rect.x_min.get() as f64, rect.x_max.get() as f64] {
 +        for y in [rect.y_min.get() as f64, rect.y_max.get() as f64] {
@@ -15190,7 +15296,7 @@ index 91bdb52df..d530d59b1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..98d77c74f 100644
+index 6e5379213..321c241ef 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -15246,7 +15352,7 @@ index 6e5379213..98d77c74f 100644
 +    take_avm1_unloaded_skipped, take_inner_goto_stats, take_orphan_list_max, set_frame_orphan_queue,
 +};
 +pub use display_object::set_lazy_shapes;
-+pub use drawing::{set_sprite_cull, take_sprite_cull_stats};
++pub use drawing::{set_leaf_cull, set_sprite_cull, take_sprite_cull_stats};
 +pub use display_object::{set_full_frame_skip, set_stage_skip, take_enter_skipped, take_subtrees_skipped};
  pub mod context;
  pub mod context_menu;

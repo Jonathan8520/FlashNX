@@ -1803,6 +1803,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !sprite_cull {
         log(b"cull: spritecull.off present -> off-screen sprite drawings are drawn\n\0");
     }
+    // `sdmc:/switch/FlashNX/leafcull.off`: a sprite with only an off-screen
+    // drawing still pushes its transform and walks its children (#139).
+    let leaf_cull = !backend::render::marker_present("leafcull.off");
+    ruffle_core::set_leaf_cull(leaf_cull);
+    if !leaf_cull {
+        log(b"cull: leafcull.off present -> off-screen sprites walked\n\0");
+    }
     // `sdmc:/switch/FlashNX/avm1goto.off`: an AS2 gotoAndStop/nextFrame runs
     // the AS3 inner frame again, as upstream does (see
     // `explicit_goto_runs_inner_frame` in our Ruffle). Same kind of switch.
@@ -2538,18 +2545,20 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-29: small callees copied into their callers by the JIT (#139):
-    // such methods are compiled twice and window 0 runs the copy without
-    // them (`set_jit_ab`). Measured before with this switch: off-screen
-    // sprite drawings left out (`set_sprite_cull`, render 15.9 -> 6.8 ms on
-    // Happy Wheels), typed ints in the JIT (nothing on Happy Wheels), the
-    // JIT's stack cache, the collector's longer sleep on small heaps
+    // 2026-10-30: off-screen sprites left out whole (`set_leaf_cull`), off in
+    // window 0 (#139; -0.6 ms of render on Happy Wheels). Measured before
+    // with this switch: the callee's flags read once (`set_jit_call_meta`,
+    // nothing measurable, taken out), small callees copied into
+    // their callers (`set_jit_ab`, -2.1 ms on Happy Wheels), off-screen
+    // sprite drawings left out (`set_sprite_cull`, render 15.9 -> 6.8 ms),
+    // typed ints in the JIT (nothing on Happy Wheels), the JIT's stack
+    // cache, the collector's longer sleep on small heaps
     // (`set_gc_small_pacing`, -2 ms a frame on Happy Wheels), AVM1 pushes
     // decoded without their Vec (`set_avm1_fast_push`, -10 % on an AS2 game),
     // the AVM2 JIT (`set_jit`, -17.5 ms a frame on Fireboy 2), direct calls
     // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
     // call path (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_jit_ab(true, regime == 0);
+    ruffle_core::set_leaf_cull(regime != 0);
     // Only this build calls here: keep the JIT's op address map, written to
     // the card when the game ends (`ruffle_shutdown`), so the profile can
     // name the ops behind its samples in compiled code.

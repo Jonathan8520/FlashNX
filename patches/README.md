@@ -254,6 +254,26 @@ off screen; draw calls 3 509 -> 324, render 15.9 -> 6.8 ms, frame 47.3 ->
 39.8 ms (medians). Nothing missing or late at the edges of the screen. Full
 suite: 4071 passed, the two known failures.
 
+**Same files, `display_object.rs`: such a sprite left out whole
+(`flashnx_leaf_off_screen`), `leafcull.off` to compare.** Skipping the
+drawing still left ~2 us a sprite of walk: `render_base` pushed its
+transform (matrix and color transform products), read its blend mode, bitmap
+cache and masks, and walked its empty children through a `RenderIter` (an
+`Rc` of their list). `render_base` now leaves out, first thing, a sprite
+with no children whose drawing misses the screen through its parent's
+transform times its own (`Drawing::leaf_off_screen`, f64), when nothing else
+draws or changes how it draws: normal blend, no scrollRect, mask, opaque
+background or bitmap cache (and so no filter). The bounds test comes before
+the children count, which reads one more allocation. The `cull:` line counts
+these apart. A/B on "$1000 TRIP", same session: render -0.58 ms a frame
+(11 pairs of neighbouring windows, standard error 0.08 ms); the walk's own
+time 4.6 -> 3.2 ms in the profile, the rest of it being reading each sprite
+at all (depth, visibility, `pre_render`). Nothing missing at the edges.
+Full suite: 4071 passed, the two known failures. Tried with it and taken
+out: the callee's flags and parameter kinds kept in its `Method` for
+`fast_call`, and a return of a value of the declared type without
+`coerce_to_type`: nothing measurable (their reads went 0.32 -> 0.16 ms).
+
 **`core/src/display_object/movie_clip.rs`, `core/src/context.rs` — the
 movie's own script timeout.**
 

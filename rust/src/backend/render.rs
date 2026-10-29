@@ -16253,12 +16253,13 @@ impl RenderBackend for SwitchRenderBackend {
                     ));
                 }
                 // Sprite drawings left out because they cannot reach the
-                // screen (#139, `spritecull.off`).
-                let (sprites_drawn, sprites_culled) = ruffle_core::take_sprite_cull_stats();
-                if sprites_culled > 0 {
+                // screen (#139, `spritecull.off`), and sprites left out
+                // whole for it (`leafcull.off`).
+                let (sprites_drawn, sprites_culled, leaves_culled) = ruffle_core::take_sprite_cull_stats();
+                if sprites_culled > 0 || leaves_culled > 0 {
                     log_str(&std::format!(
-                        "cull: f{} last 300 frames: sprite drawings drawn {}, left out off screen {}\n",
-                        self.frame_count, sprites_drawn, sprites_culled
+                        "cull: f{} last 300 frames: sprite drawings drawn {}, left out off screen {}, with their whole sprite {}\n",
+                        self.frame_count, sprites_drawn, sprites_culled, leaves_culled
                     ));
                 }
                 // Which event sounds were started, and how often: a sound
