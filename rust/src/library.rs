@@ -5293,6 +5293,15 @@ fn input_inner(button: &str) -> bool {
             // (`fp_back_screen`).
             if matches!(button, "B" | "Plus" | "Minus") {
                 s.screen = fp_back_screen(&s, selection, scroll);
+            } else if button == "X" {
+                // The description in the interface's language, for this
+                // window and the next ones, or back to the originals
+                // (`translate.rs`). Render asks for it.
+                let desc = s.cover_candidates.get(selection).map(|c| c.description.clone()).unwrap_or_default();
+                if crate::translate::available(&desc) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                    crate::translate::toggle();
+                }
             } else if button == "A" {
                 s.screen = fp_back_screen(&s, selection, scroll);
                 fp_activate(&mut s, selection, scroll);
@@ -13950,6 +13959,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 poll_fp_search();
             }
             drive_fp_details();
+            // A translation that comes after its window closed is kept for
+            // the next time it opens.
+            let _ = crate::translate::drive(None, false);
             // The page opens out of what asked for it (the search button, the
             // studio's "see all" tile) and folds back into it, as an archive
             // opens out of its row.
@@ -14017,6 +14029,23 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 })
             });
             if let Some((title, dev, publisher, release, cover, shot, desc, installed, pending, studio)) = snap {
+                // X's translation: asked for here when it is on, and not while
+                // a search of the page behind is on its way (the request would
+                // cancel it).
+                let searching = LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(true);
+                if let Some(msg) = crate::translate::drive(Some(&desc), !searching) {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        set_toast(&mut s, msg, TOAST_ERR);
+                    }
+                }
+                let u = crate::loc_ui::ui();
+                let (shown, translation) = match crate::translate::view(&desc) {
+                    crate::translate::View::Original => (desc.clone(), None),
+                    crate::translate::View::Pending => (desc.clone(), Some(true)),
+                    crate::translate::View::Translated(t) => (t, Some(false)),
+                };
+                let translate = crate::translate::available(&desc)
+                    .then(|| if crate::translate::is_on() { u.fp_original } else { u.fp_translate });
                 backend.draw_library_fp_details(&crate::backend::render::FpDetailsView {
                     title: &title,
                     developer: &dev,
@@ -14025,7 +14054,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     size: if pending { None } else { Some(size) },
                     cover_url: &cover,
                     shot_url: &shot,
-                    description: &desc,
+                    description: &shown,
+                    translate,
+                    translation,
                     installed,
                     studio,
                 });

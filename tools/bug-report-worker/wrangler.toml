@@ -13,3 +13,8 @@ GITHUB_REPO = "Jonathan8520/FlashNX"
 [[kv_namespaces]]
 binding = "PROFILES_KV"
 id = "7e2c8186f131443595b13be6c22f5aa9"
+
+# Workers AI, for /translate (a Flashpoint description in the app's language).
+# Its translations are cached in PROFILES_KV under "tr:" keys.
+[ai]
+binding = "AI"

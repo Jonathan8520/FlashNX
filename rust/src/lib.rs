@@ -922,6 +922,7 @@ mod profiles;
 mod sd;
 mod sources;
 mod tags;
+mod translate;
 mod updater;
 
 use core::ffi::{c_char, c_int};

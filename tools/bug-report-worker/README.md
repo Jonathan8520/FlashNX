@@ -58,6 +58,30 @@ curl -X POST "$WORKER_URL/report" \
 # -> {"ok":true,"url":"https://github.com/.../issues/NN"}
 ```
 
+## Translating Flashpoint descriptions (`/translate`)
+
+X in a Flashpoint game's details window asks this Worker for the description
+in the app's language. It runs on **Workers AI** (`@cf/google/gemma-4-26b-a4b-it`,
+`@cf/meta/m2m100-1.2b` as a fallback) and keeps each translation in
+`PROFILES_KV` under `tr:` keys for 180 days, so a description is translated once
+for everybody.
+
+- The Worker needs the **`AI` binding**. `wrangler deploy` reads it from
+  `wrangler.toml`. From the dashboard: the Worker → Settings → Bindings → Add →
+  Workers AI, variable name `AI`.
+- Cost: about 15 Neurons per new translation. The free plan gives 10,000 a day
+  (reset at 00:00 UTC), so roughly 650 new descriptions a day; past that the
+  route answers 502 until the reset, and the app says the translation is
+  unavailable. Cached ones cost nothing.
+- To change the model (Cloudflare retires them), edit `TRANSLATE_MODEL`: no new
+  app build is needed. Bump the `tr:1:` prefix to drop the old translations.
+
+```sh
+curl -X POST "$WORKER_URL/translate" -H "Content-Type: application/json" \
+  -d '{"text":"Jump, run and fight your way through 40 levels.","lang":"fr"}'
+# -> {"ok":true,"text":"Sautez, courez et combattez à travers 40 niveaux."}
+```
+
 ## Deploy order (Worker first)
 
 The Worker tolerates a report that omits `disk_size`, `companions`,

@@ -598,6 +598,41 @@ pub fn tick_get_async() -> GetPoll {
     GetPoll::Done(buf)
 }
 
+/// Start a POST of the JSON `body` on net.cpp's request thread and return at
+/// once with its id, to poll with `tick_post_async` from the frames. The
+/// thread runs one request at a time and a new one supersedes it: the caller
+/// makes sure no search of `start_get_async` is still on its way.
+pub(crate) fn start_post_async(url: &str, body: &str) -> Result<i32, std::string::String> {
+    offline_check()?;
+    let url_c = cstr(url);
+    let body_c = cstr(body);
+    let id = unsafe { https_job_start(1, url_c.as_ptr() as *const c_char, body_c.as_ptr() as *const c_char) };
+    if id < 0 {
+        return Err(crate::loc::err_https(&std::format!("rc {}", id)));
+    }
+    Ok(id)
+}
+
+/// Poll a `start_post_async` request once. None when it is no longer the
+/// thread's request (another one superseded it), which nobody reports.
+pub(crate) fn tick_post_async(id: i32, cap: usize) -> Option<GetPoll> {
+    match unsafe { https_job_poll(id) } {
+        0 => Some(GetPoll::Pending),
+        1 => {
+            let mut buf = std::vec![0u8; cap];
+            let n = unsafe { https_job_take(id, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+            if n < 0 {
+                return Some(GetPoll::Error(std::string::String::from(crate::loc::s().err_response_big)));
+            }
+            buf.truncate(n as usize);
+            Some(GetPoll::Done(buf))
+        }
+        -4 => None,
+        -3 => Some(GetPoll::Error(std::string::String::from(crate::loc::s().err_response_big))),
+        _ => Some(GetPoll::Error(https_error_message(Sink::Memory))),
+    }
+}
+
 // ── Async thumbnail GET (cover/logo grids) ─────────────────────────────────
 
 /// Start an async thumbnail GET in a free pool slot (covers download in

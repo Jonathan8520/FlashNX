@@ -381,8 +381,15 @@ pub(crate) struct FpDetailsView<'a> {
     /// Its screenshot, under the logo (`discover::screenshot_url`, the one the
     /// shelves show, so a shelf's game has it already). Empty for none.
     pub shot_url: &'a str,
-    /// The blurb, empty for none. The search gives it with the game.
+    /// The blurb, empty for none. The search gives it with the game; its
+    /// translation once X asked for it (`translate.rs`).
     pub description: &'a str,
+    /// X: what it does, None when there is nothing to translate.
+    pub translate: Option<&'a str>,
+    /// Over the blurb: its translation on the way (`Some(true)`, a spinner),
+    /// or come (`Some(false)`, saying it is a machine's). None for the
+    /// original.
+    pub translation: Option<bool>,
     pub installed: bool,
     /// Y opens its developer's games ("Du même studio", `Some(false)`), or,
     /// with no developer, its publisher's ("Du même éditeur", `Some(true)`).
@@ -441,7 +448,10 @@ impl SwitchRenderBackend {
         // The blurb runs under the facts, beside the pictures, and gets what
         // the window has room for, up to its full height, rather than six lines
         // and an ellipsis.
-        let room = MAX_H - PAD - head_h - 24.0 - 30.0 - 60.0;
+        // A translation says so on a line of its own over the blurb.
+        const NOTE_H: f32 = 26.0;
+        let note_h = if d.translation.is_some() { NOTE_H } else { 0.0 };
+        let room = MAX_H - PAD - head_h - 24.0 - 30.0 - 60.0 - note_h;
         let max_lines = ((room / 23.0).floor() as usize).max(2);
         let desc_lines = self.kit_wrap(d.description, size::LABEL + 1.0, text_w, max_lines);
         // The screenshot's place is settled when the window opens: a game known
@@ -462,7 +472,7 @@ impl SwitchRenderBackend {
             Err(_) => has_shot,
         };
         let art_h = if shot_slot { 2.0 * ART_H + ART_GAP } else { ART_H };
-        let desc_h = if desc_lines.is_empty() { 0.0 } else { 24.0 + desc_lines.len() as f32 * 23.0 };
+        let desc_h = if desc_lines.is_empty() { 0.0 } else { 24.0 + note_h + desc_lines.len() as f32 * 23.0 };
         let h = PAD + art_h.max(head_h + desc_h) + 30.0 + 60.0;
         let frame = self.draw_modal_frame(W, 0, Some(h), false, "", None, None);
         let (x, y) = (frame.x, frame.y);
@@ -499,19 +509,33 @@ impl SwitchRenderBackend {
             ty += 28.0;
         }
         let mut ly = ay + head_h + 24.0;
+        if !desc_lines.is_empty() {
+            match d.translation {
+                Some(true) => {
+                    self.draw_spinner(tx + 7.0, ly, 6.0, now);
+                    self.kit_text_mid(tx + 22.0, ly, size::CAPTION, u.fp_translating, col::TEXT3);
+                }
+                Some(false) => {
+                    self.kit_icon(tx, ly, 14.0, Icon::Globe, col::TEXT3);
+                    self.kit_text_mid(tx + 22.0, ly, size::CAPTION, u.fp_translated, col::TEXT3);
+                }
+                None => {}
+            }
+            ly += note_h;
+        }
         for line in &desc_lines {
             self.kit_text_mid(tx, ly, size::LABEL + 1.0, line, col::TEXT3);
             ly += 23.0;
         }
-        let play = (&[Btn::A][..], if d.installed { u.hint_play } else { u.download });
-        let back = (&[Btn::B][..], u.back);
-        match d.studio {
-            Some(publisher) => {
-                let label = if publisher { u.fp_same_publisher } else { u.fp_same_studio };
-                self.modal_hints(&frame, &[play, (&[Btn::Y][..], label), back], false);
-            }
-            None => self.modal_hints(&frame, &[play, back], false),
+        let mut hints: std::vec::Vec<kit::text::HintItem> = std::vec![(&[Btn::A][..], if d.installed { u.hint_play } else { u.download })];
+        if let Some(label) = d.translate {
+            hints.push((&[Btn::X][..], label));
         }
+        if let Some(publisher) = d.studio {
+            hints.push((&[Btn::Y][..], if publisher { u.fp_same_publisher } else { u.fp_same_studio }));
+        }
+        hints.push((&[Btn::B][..], u.back));
+        self.modal_hints(&frame, &hints, false);
         self.fp_done();
     }
 }
