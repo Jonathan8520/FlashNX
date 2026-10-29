@@ -813,6 +813,53 @@ again after the op, and `Enum()`'s `getlocal 4, kill 4, setproperty`
 stored undefined. The untyped code now owns that entry (test
 `local_killed_under_it`).
 
+**Same file, `method.rs`, `stack.rs`, `activation.rs`: small callees copied
+into their callers (FlashNX #139), `jitinline.off` to compare.** Box2DFlash
+(Happy Wheels) makes ~25 000 calls a frame, ~40 % of them to bodies of a few
+ops (`b2Math.b2Max`, `b2Min`, `b2Bound.IsLower`, `b2Vec2.SetV`). A call
+through `fast_call` cost ~350 ns on the console, measured with the sampling
+profiler (vtable, method, body and parameters read, a new `Activation`);
+Flash Player's is ~6 ns (Jackson Dunstan's FP 11.2 measures, 10 million
+calls in 54-70 ms). So the JIT copies the callee in place:
+- Which method a `callmethod` reaches is known at run time only. While the
+  caller is interpreted, `observe` notes the receiver's method at each site
+  in the caller's `Method` (`flashnx_sites`, traced: the callee outlives the
+  code that compares against it); a site that saw two methods stays a call.
+  `run` keeps a method interpreted for up to 4 calls while some of its sites
+  have not run yet.
+- `splice` puts the callee after its `callmethod`, which becomes a guard
+  (`h_guard`: the receiver's method at that vtable index is the one seen,
+  the same test `call_method_with_args` makes; any other receiver makes the
+  call and goes on after it). The callee's locals are the caller's stack
+  slots where the receiver and the arguments already are, addressed as
+  locals past the caller's own; its other locals are pushed undefined, its
+  parameters coerced in place with the ops that do what `coerce_to_type`
+  does, its returns coerced the same, the value left in the receiver's slot,
+  the rest dropped, a jump to the op after the call. The frame grows by what
+  that takes (`Method::flashnx_frame_extra`, read by `get_stack_frame`); a
+  frame taken before (the call that compiled it) runs in the interpreter.
+- Only ops whose result does not depend on the activation are copied
+  (`copyable`), callees of at most 40 ops without loops, calls, `arguments`
+  or handlers. An error in a copy is thrown the same, from the caller's frame.
+- `shape`, `analyze` and `emit` know the guard's two ways out (the call's
+  effect only on the way past the copy). The helpers read their op in the
+  spliced list (`CodeInfo`, behind the code header); the interpreter takes
+  over at the method's own op (`orig`), and leaving inside a copy, which
+  only a wrong `effect` or int proof could do, is an error.
+- The profiling build compiles such methods twice and its A/B runs either.
+
+PC test `callee_copied`: depths on both ways out of each guard, returns
+that drop what the callee left below them, a loop around a copied call.
+
+On the console, Happy Wheels' "$1000 TRIP" at 1785 MHz, A/B in two sessions:
+~400 sites copied in ~128 methods, ~25-30 % of the calls, guards missed
+fewer than 1 in 1000; script time per frame -2.1 ms (median of 18 pairs of
+neighbouring windows; -3.5 and -0.8 ms between regimes in each session).
+No AS3 error, physics as before to the eye. Less than estimated: many callees
+are native (`Math.*`), longer or hold an op not copied (the `jit:` line names
+them). Left: a guard costs ~80 ns (the receiver, vtable and method reads
+remain), the other calls ~13 % of the frame.
+
 **`render/src/utils.rs`: `DefineBitsLossless` RGB32 pixels swizzled as a
 `u32` rotation.** `<[u8]>::rotate_left(1)` on each 4-byte pixel went through
 `ptr_rotate`'s memmove: 3.8 s of SMBC's startup (4 400 bitmaps); its first

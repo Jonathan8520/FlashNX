@@ -1953,6 +1953,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !jit_check {
         log(b"jit: jitcheck.off present -> typed ints not checked\n\0");
     }
+    // `sdmc:/switch/FlashNX/jitinline.off`: every `callmethod` of compiled
+    // code is a call, small callees included (`set_jit_inline`).
+    let jit_inline = !backend::render::marker_present("jitinline.off");
+    ruffle_core::set_jit_inline(jit_inline);
+    if !jit_inline {
+        log(b"jit: jitinline.off present -> no callee copied into its caller\n\0");
+    }
     // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
     // list again in enterFrame, frame construction and frame scripts (see
     // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.
@@ -2531,16 +2538,18 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-29: off-screen sprite drawings left out (#139), drawn in window
-    // 0. Measured before with this switch: typed ints in the JIT
-    // (`set_jit_ab`, every method compiled twice; nothing on Happy Wheels),
-    // the JIT's stack cache, the collector's longer sleep on small heaps
+    // 2026-10-29: small callees copied into their callers by the JIT (#139):
+    // such methods are compiled twice and window 0 runs the copy without
+    // them (`set_jit_ab`). Measured before with this switch: off-screen
+    // sprite drawings left out (`set_sprite_cull`, render 15.9 -> 6.8 ms on
+    // Happy Wheels), typed ints in the JIT (nothing on Happy Wheels), the
+    // JIT's stack cache, the collector's longer sleep on small heaps
     // (`set_gc_small_pacing`, -2 ms a frame on Happy Wheels), AVM1 pushes
     // decoded without their Vec (`set_avm1_fast_push`, -10 % on an AS2 game),
     // the AVM2 JIT (`set_jit`, -17.5 ms a frame on Fireboy 2), direct calls
     // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
     // call path (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_sprite_cull(regime != 0);
+    ruffle_core::set_jit_ab(true, regime == 0);
     // Only this build calls here: keep the JIT's op address map, written to
     // the card when the game ends (`ruffle_shutdown`), so the profile can
     // name the ops behind its samples in compiled code.

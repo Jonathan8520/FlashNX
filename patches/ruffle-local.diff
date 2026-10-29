@@ -1574,7 +1574,7 @@ index 563ffbb03..037b6c0c9 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..2e272a6e1 100644
+index ed1ff3034..108f72b0e 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -1587,7 +1587,7 @@ index ed1ff3034..2e272a6e1 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,144 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,153 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -1665,6 +1665,15 @@ index ed1ff3034..2e272a6e1 100644
 +    let _ = on;
 +}
 +
++/// FlashNX: compiled code carries small callees in place of their call (on
++/// by default; `jitinline.off`), see `activation_jit::plan_inlines`.
++pub fn set_jit_inline(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_inline(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
 +/// FlashNX: compiled code keeps ints out of their `Value`s where it can
 +/// prove them (on by default; `jitint.off`), see `activation_jit::Typer`.
 +pub fn set_jit_ints(on: bool) {
@@ -1683,9 +1692,9 @@ index ed1ff3034..2e272a6e1 100644
 +    let _ = on;
 +}
 +
-+/// FlashNX, profiling build: compile every method a second time without
-+/// typed ints (`dual`), and run that second code (`alt`) in the A/B's other
-+/// windows.
++/// FlashNX, profiling build: compile every method that has callees copied
++/// in place a second time without them (`dual`), and run that second code
++/// (`alt`) in the A/B's other windows.
 +pub fn set_jit_ab(dual: bool, alt: bool) {
 +    #[cfg(feature = "flashnx_jit")]
 +    {
@@ -1732,7 +1741,7 @@ index ed1ff3034..2e272a6e1 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +274,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +283,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -1741,7 +1750,7 @@ index ed1ff3034..2e272a6e1 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +298,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +307,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -1750,7 +1759,7 @@ index ed1ff3034..2e272a6e1 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +353,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +362,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -1766,7 +1775,7 @@ index ed1ff3034..2e272a6e1 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +487,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +496,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -1791,7 +1800,7 @@ index ed1ff3034..2e272a6e1 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +589,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +598,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -1800,7 +1809,7 @@ index ed1ff3034..2e272a6e1 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +670,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +679,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -1817,7 +1826,7 @@ index ed1ff3034..2e272a6e1 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +804,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +813,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -1841,7 +1850,7 @@ index ed1ff3034..2e272a6e1 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +828,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +837,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -1857,7 +1866,20 @@ index ed1ff3034..2e272a6e1 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,12 +1126,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -678,7 +867,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                     index,
+                     num_args,
+                     push_return_value,
+-                } => self.op_call_method(*index, *num_args, *push_return_value),
++                } => {
++                    #[cfg(feature = "flashnx_jit")]
++                    jit::observe(self, method, ip - 1, *index, *num_args);
++                    self.op_call_method(*index, *num_args, *push_return_value)
++                }
+                 Op::CallNative {
+                     method,
+                     num_args,
+@@ -946,12 +1139,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -1880,7 +1902,7 @@ index ed1ff3034..2e272a6e1 100644
          }
          Ok(())
      }
-@@ -2023,6 +2212,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2225,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -1891,7 +1913,7 @@ index ed1ff3034..2e272a6e1 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2265,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2278,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -1902,8 +1924,7 @@ index ed1ff3034..2e272a6e1 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
 +            (value1, value2) => {
@@ -1913,12 +1934,13 @@ index ed1ff3034..2e272a6e1 100644
 +                value1.wrapping_add(value2)
 +            }
 +        };
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +        self.push_stack(sum_value);
  
          Ok(())
      }
-@@ -2134,8 +2339,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2352,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1929,7 +1951,7 @@ index ed1ff3034..2e272a6e1 100644
  
          Ok(())
      }
-@@ -2151,8 +2357,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2370,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1940,7 +1962,7 @@ index ed1ff3034..2e272a6e1 100644
  
          Ok(())
      }
-@@ -2175,8 +2382,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2395,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1951,7 +1973,7 @@ index ed1ff3034..2e272a6e1 100644
  
          Ok(())
      }
-@@ -2274,6 +2482,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2495,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1960,7 +1982,7 @@ index ed1ff3034..2e272a6e1 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2498,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2511,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -1986,10 +2008,10 @@ index ed1ff3034..2e272a6e1 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..95d62ee9f
+index 000000000..016f6edec
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,3866 @@
+@@ -0,0 +1,4571 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -2072,6 +2094,25 @@ index 000000000..95d62ee9f
 +const H_TRUTHY: usize = 251;
 +const H_TIMEOUT: usize = 252;
 +const H_RETURN: usize = 253;
++/// Whether a callee copied in place is the receiver's (`h_guard`).
++const H_GUARD: usize = 243;
++
++/// A small callee seen at a `callmethod` while its caller was interpreted is
++/// copied in place of the call (`plan_inlines`). Off from the `jitinline.off`
++/// marker.
++static INLINE: AtomicBool = AtomicBool::new(true);
++
++pub fn set_inline(on: bool) {
++    INLINE.store(on, AtomicOrdering::Relaxed);
++}
++
++/// A method stays interpreted for up to this many calls while some of its
++/// `callmethod`s have not run yet, so `plan_inlines` knows their callees.
++const INLINE_WAIT: usize = 4;
++/// The biggest callee copied, in ops.
++const INLINE_MAX_OPS: usize = 40;
++/// Stack slots a method may grow by for its copies (`flashnx_frame_extra`).
++const INLINE_MAX_STACK: usize = 64;
 +
 +static ENABLED: AtomicBool = AtomicBool::new(true);
 +/// `callmethod` straight into compiled code (`fast_call`); the profiling
@@ -2161,6 +2202,35 @@ index 000000000..95d62ee9f
 +    num_locals: usize,
 +    result: Option<Result<Value<'static>, Error<'static>>>,
 +    resume_ip: usize,
++    /// The code's callees copied in place (`CodeInfo`), or null.
++    info: *const CodeInfo,
++}
++
++/// What code compiled with callees copied in place (`splice`) needs at run
++/// time, behind the pointer in its header: the op list it was compiled from
++/// (helpers read their op there), the method's op each of those comes from
++/// (`u32::MAX`: a callee's), the callee each guard expects (`h_guard`), and
++/// the frame it needs.
++struct CodeInfo {
++    ops: Vec<Op<'static>>,
++    orig: Vec<u32>,
++    expect: Vec<usize>,
++    frame: usize,
++}
++
++/// Where the interpreter takes over from op `t` of the compiled list, in the
++/// method's own ops; `usize::MAX` inside a copied callee, which the method
++/// does not have (`run_compiled` turns it into an error).
++#[inline(always)]
++unsafe fn orig_ip(c: &Ctx, t: usize) -> usize {
++    if c.info.is_null() {
++        return t;
++    }
++    let info = unsafe { &*c.info };
++    match info.orig.get(t) {
++        Some(&o) if o != u32::MAX => o as usize,
++        _ => usize::MAX,
++    }
 +}
 +
 +const CTX_DM_PTR: usize = 16;
@@ -2213,6 +2283,15 @@ index 000000000..95d62ee9f
 +    /// when `set_map` asked for it: the profiling build's attribution of
 +    /// samples in compiled code to the ops that produced it.
 +    map: Vec<(usize, String)>,
++    /// Code compiled with callees copied in place, alive with its code.
++    infos: Vec<Box<CodeInfo>>,
++    /// Callees copied, in how many methods; guards that found the callee
++    /// they expected, and that called; why a seen callee was not copied.
++    inl_sites: u64,
++    inl_methods: u64,
++    inl_hits: u64,
++    inl_misses: u64,
++    inl_refused: FnvHashMap<String, u64>,
 +    /// The name of each op kind met while compiling, for `HELPER_N`.
 +    #[cfg(feature = "flashnx_instr")]
 +    kind_names: FnvHashMap<usize, String>,
@@ -2321,6 +2400,12 @@ index 000000000..95d62ee9f
 +            slow_names: FnvHashMap::default(),
 +            layout: Layout::default(),
 +            map: Vec::new(),
++            infos: Vec::new(),
++            inl_sites: 0,
++            inl_methods: 0,
++            inl_hits: 0,
++            inl_misses: 0,
++            inl_refused: FnvHashMap::default(),
 +            #[cfg(feature = "flashnx_instr")]
 +            kind_names: FnvHashMap::default(),
 +        })
@@ -2875,8 +2960,10 @@ index 000000000..95d62ee9f
 +// ---------------------------------------------------------------- compiler
 +
 +/// The stack depth before every reachable op (`u32::MAX`: unreachable) and
-+/// the branch targets, or why the method cannot be compiled.
-+fn shape(ops: &[Op<'_>], ms: usize) -> Result<(Vec<u32>, Vec<bool>), String> {
++/// the branch targets, or why the method cannot be compiled. `guards`: the
++/// `callmethod`s whose callee follows them (`splice`), and where the code
++/// goes on after it: the call's own effect only applies on the way there.
++fn shape(ops: &[Op<'_>], ms: usize, guards: &FnvHashMap<usize, usize>) -> Result<(Vec<u32>, Vec<bool>), String> {
 +    let n = ops.len();
 +    // Stack depth before every reachable op.
 +    let mut depth = vec![u32::MAX; n];
@@ -2893,36 +2980,46 @@ index 000000000..95d62ee9f
 +        if nd > ms {
 +            return Err("overflow".into());
 +        }
-+        let succ: std::vec::Vec<usize> = match op {
-+            Op::Jump { offset } | Op::PopJump { offset } => std::vec![*offset],
-+            Op::IfTrue { offset } | Op::IfFalse { offset } => std::vec![i + 1, *offset],
++        let succ: std::vec::Vec<(usize, usize)> = match op {
++            _ if guards.contains_key(&i) => std::vec![(i + 1, d), (guards[&i], nd)],
++            Op::Jump { offset } | Op::PopJump { offset } => std::vec![(*offset, nd)],
++            Op::IfTrue { offset } | Op::IfFalse { offset } => std::vec![(i + 1, nd), (*offset, nd)],
 +            Op::LookupSwitch(ls) => {
 +                // One compare per case, `cmp w0, #k`: 12 bits of k.
 +                if ls.case_offsets.len() >= 4096 {
 +                    return Err("switch size".into());
 +                }
-+                let mut t: std::vec::Vec<usize> = ls.case_offsets.iter().map(|c| c.get()).collect();
-+                t.push(ls.default_offset.get());
++                let mut t: std::vec::Vec<(usize, usize)> = ls.case_offsets.iter().map(|c| (c.get(), nd)).collect();
++                t.push((ls.default_offset.get(), nd));
 +                t
 +            }
 +            Op::ReturnValue { .. } | Op::ReturnVoid { .. } | Op::Throw => std::vec::Vec::new(),
-+            _ => std::vec![i + 1],
++            _ => std::vec![(i + 1, nd)],
 +        };
-+        for t in succ {
++        for (t, td) in succ {
 +            if t >= n {
 +                return Err("falls off".into());
 +            }
 +            if depth[t] == u32::MAX {
-+                depth[t] = nd as u32;
++                depth[t] = td as u32;
 +                work.push(t);
-+            } else if depth[t] as usize != nd {
++            } else if depth[t] as usize != td {
 +                return Err("depth merge".into());
 +            }
 +        }
 +    }
 +
-+    // Branch targets: the stack cache is empty there (`Tos`).
++    // Branch targets: the stack cache is empty there (`Tos`). Both ways out
++    // of a guard are.
 +    let mut target = vec![false; n];
++    for (&g, &cont) in guards {
++        if g + 1 < n {
++            target[g + 1] = true;
++        }
++        if cont < n {
++            target[cont] = true;
++        }
++    }
 +    for op in ops.iter() {
 +        if let Op::Jump { offset } | Op::PopJump { offset } | Op::IfTrue { offset } | Op::IfFalse { offset } = op
 +            && *offset < n
@@ -2940,6 +3037,346 @@ index 000000000..95d62ee9f
 +    Ok((depth, target))
 +}
 +
++// ---------------------------------------------------------------- inlining
++//
++// Box2DFlash (Happy Wheels, Fireboy & Watergirl) makes ~25 000 calls a
++// frame, ~40 % of them to bodies of a few ops: `b2Math.b2Max`, `b2Min`,
++// `b2Bound.IsLower`, `b2Vec2.SetV`. A call through `fast_call` costs ~350 ns
++// on the console (what the vtable, the method, its body, its parameters and
++// a new `Activation` take to read and set up, 2026-10-29), where Flash
++// Player's is ~6 ns: those calls were ~18 % of a Happy Wheels frame.
++//
++// So a callee is copied into its caller, as JITs do (avmplus never did):
++// - Which method a `callmethod` calls is only known at run time. The
++//   interpreter notes it at each site while the caller is not compiled yet
++//   (`observe`, kept in the caller's `Method`, traced, so it outlives the
++//   code that compares against it). A site that saw two methods is a call.
++// - The copy runs behind a guard, the receiver's method at that vtable index
++//   (`h_guard`, ~20 ns): any other receiver makes the call, as before.
++// - The callee's locals are the caller's stack slots where the receiver and
++//   the arguments already are (its `this` and parameters, in place), its own
++//   stack goes on above them, and its ops address them as locals past the
++//   caller's (`GetLocal { nl + slot }`): the frame grows by what that takes
++//   (`flashnx_frame_extra`). Its returns put the value in the receiver's slot
++//   and jump to the op after the call.
++// - Only ops whose result does not depend on the activation they run in are
++//   copied (`copyable`): locals, constants, arithmetic, comparisons,
++//   coercions, slots, forward branches. Parameters and returns are coerced
++//   as `coerce_to_type` does, with the same ops the interpreter has. An error
++//   in a copy is thrown the same, from the caller.
++
++/// The interpreter is at `callmethod` op `site` of `method`: note which
++/// method its receiver has at `index`, while `method` is not compiled yet.
++#[inline(always)]
++pub(super) fn observe<'gc>(act: &Activation<'_, 'gc>, method: Method<'gc>, site: usize, index: usize, num_args: u32) {
++    if method.flashnx_jit().get() > 0xFFFF || !INLINE.load(AtomicOrdering::Relaxed) || !enabled() {
++        return;
++    }
++    observe_receiver(act, method, site, index, num_args);
++}
++
++#[inline(never)]
++fn observe_receiver<'gc>(act: &Activation<'_, 'gc>, method: Method<'gc>, site: usize, index: usize, num_args: u32) {
++    if let Value::Object(obj) = act.stack.peek(num_args as usize)
++        && let Some(full) = obj.vtable().get_full_method(index)
++    {
++        method.flashnx_observe(act.gc(), site as u32, full.method);
++    }
++}
++
++/// Whether some reachable-looking `callmethod` of `method` never ran yet:
++/// `run` keeps it interpreted a little longer so `observe` sees it.
++fn unseen_sites(method: Method<'_>) -> bool {
++    method
++        .get_verified_info()
++        .parsed_code
++        .iter()
++        .enumerate()
++        .any(|(i, op)| matches!(op, Op::CallMethod { .. }) && method.flashnx_site(i as u32).is_none())
++}
++
++/// Ops a copied callee may hold: their result does not depend on the
++/// activation running them, they do not call, and they never jump back.
++fn copyable(op: &Op<'_>) -> bool {
++    use Op::*;
++    matches!(
++        op,
++        GetLocal { .. } | SetLocal { .. } | StoreLocal { .. } | Kill { .. } | IncLocal { .. }
++            | IncLocalI { .. } | DecLocal { .. } | DecLocalI { .. } | PushDouble { .. } | PushFalse
++            | PushInt { .. } | PushNull | PushString { .. } | PushTrue | PushUint { .. } | PushUndefined
++            | Pop | Dup | Swap | Nop | Add | AddI | Subtract | SubtractI | Multiply | MultiplyI
++            | Divide | Modulo | Negate | NegateI | Increment | IncrementI | Decrement | DecrementI
++            | BitAnd | BitOr | BitXor | BitNot | LShift | RShift | URShift | Equals | StrictEquals
++            | LessThan | LessEquals | GreaterThan | GreaterEquals | Not | CoerceA | CoerceB | CoerceD
++            | CoerceI | CoerceU | CoerceS | Coerce { .. } | GetSlot { .. } | SetSlot { .. }
++            | SetSlotCoerceI { .. } | SetSlotNoCoerce { .. } | IfTrue { .. } | IfFalse { .. }
++            | Jump { .. } | ReturnValue { .. } | ReturnVoid { .. }
++    )
++}
++
++/// The op that coerces a value as `coerce_to_type(class)` does (a parameter
++/// on entry, a return value).
++fn coerce_op<'gc>(class: Class<'gc>) -> Op<'gc> {
++    if class.is_builtin_int() {
++        Op::CoerceI
++    } else if class.is_builtin_uint() {
++        Op::CoerceU
++    } else if class.is_builtin_number() {
++        Op::CoerceD
++    } else if class.is_builtin_boolean() {
++        Op::CoerceB
++    } else {
++        Op::Coerce { class }
++    }
++}
++
++/// A callee to copy at a `callmethod` (`splice`).
++struct CalleeCopy<'gc> {
++    /// The `callmethod`'s op index and argument count, and whether it keeps
++    /// the result.
++    at: usize,
++    n: usize,
++    push: bool,
++    /// The callee's ops, their stack depth (`shape`), its locals.
++    body: Vec<Op<'gc>>,
++    depth: Vec<u32>,
++    locals: usize,
++    /// How each parameter is coerced on entry (`None`: any type).
++    conv: Vec<Option<Op<'gc>>>,
++    /// What `h_guard` compares the receiver's method with.
++    expect: usize,
++}
++
++/// `callee` as a copy for a call with `n` arguments, or why not.
++fn copy_of<'gc>(callee: Method<'gc>, n: usize) -> Result<(Vec<Op<'gc>>, Vec<u32>, usize, Vec<Option<Op<'gc>>>), String> {
++    let crate::avm2::method::MethodKind::Bytecode { verified_info } = callee.method_kind() else {
++        return Err("native".into());
++    };
++    let Some(info) = verified_info.get() else {
++        return Err("not verified".into());
++    };
++    if !info.exceptions.is_empty() {
++        return Err("try/catch".into());
++    }
++    if callee.needs_arguments_object() || callee.is_variadic() || callee.sets_dxns() {
++        return Err("arguments".into());
++    }
++    let body = callee.body().ok_or_else(|| "no body".to_string())?;
++    let ops = &info.parsed_code;
++    if ops.is_empty() || ops.len() > INLINE_MAX_OPS {
++        return Err("size".into());
++    }
++    let locals = body.num_locals as usize;
++    let signature = callee.resolved_param_config();
++    if signature.len() != n || locals < n + 1 {
++        return Err("arity".into());
++    }
++    let mut conv = Vec::with_capacity(n);
++    for param in signature.iter() {
++        conv.push(match param.param_type {
++            None => None,
++            Some(class) if class.is_builtin_void() => return Err("void".into()),
++            Some(class) => Some(coerce_op(class)),
++        });
++    }
++    for (k, op) in ops.iter().enumerate() {
++        if !copyable(op) {
++            return Err(format!("op {}", op_name(op)));
++        }
++        match op {
++            Op::IfTrue { offset } | Op::IfFalse { offset } | Op::Jump { offset }
++                if *offset <= k || *offset >= ops.len() =>
++            {
++                return Err("loop".into());
++            }
++            Op::ReturnValue { return_type: Some(class) } if class.is_builtin_void() => return Err("void".into()),
++            _ => {}
++        }
++    }
++    let (depth, _) = shape(ops, body.max_stack as usize, &FnvHashMap::default()).map_err(|_| "shape".to_string())?;
++    Ok((ops.to_vec(), depth, locals, conv))
++}
++
++/// The callees `observe` saw at `method`'s `callmethod`s that can be copied.
++fn plan_inlines<'gc>(s: &mut State, method: Method<'gc>, ops: &[Op<'gc>], depth: &[u32]) -> Vec<CalleeCopy<'gc>> {
++    let mut out = Vec::new();
++    for (i, op) in ops.iter().enumerate() {
++        let Op::CallMethod { num_args, push_return_value, .. } = op else { continue };
++        if depth[i] == u32::MAX {
++            continue;
++        }
++        let Some(Some(callee)) = method.flashnx_site(i as u32) else { continue };
++        if callee == method {
++            continue;
++        }
++        let n = *num_args as usize;
++        match copy_of(callee, n) {
++            Ok((body, depth, locals, conv)) => out.push(CalleeCopy {
++                at: i,
++                n,
++                push: *push_return_value,
++                body,
++                depth,
++                locals,
++                conv,
++                expect: callee.flashnx_key(),
++            }),
++            Err(why) => *s.inl_refused.entry(why).or_insert(0) += 1,
++        }
++    }
++    out
++}
++
++/// `ops` with each copy's callee after its `callmethod`, which becomes its
++/// guard: the new op list, the method's op each comes from (`u32::MAX`: a
++/// callee's), each guard's way on after the call, and the callee each guard
++/// expects. `depth` and `nl` are the method's.
++///
++/// At a guard of depth `d`, the receiver is in stack slot `b = d - n - 1`, so
++/// callee local `k` is caller local `nl + b + k`: `this` and the parameters
++/// are already there. The callee's other locals are pushed as undefined
++/// (what a new frame holds), then its parameters coerced in place, then its
++/// ops run with their locals moved up by `nl + b`. A return leaves the value
++/// in slot `b` (`SetLocal`), drops the rest (`Pop` costs no code) and jumps
++/// on, as the call would have left the stack.
++fn splice<'gc>(
++    ops: &[Op<'gc>],
++    depth: &[u32],
++    nl: usize,
++    copies: &[CalleeCopy<'gc>],
++) -> (Vec<Op<'gc>>, Vec<u32>, FnvHashMap<usize, usize>, Vec<usize>) {
++    const NONE: u32 = u32::MAX;
++    let n = ops.len();
++    let mut out: Vec<Op<'gc>> = Vec::with_capacity(n * 2);
++    let mut orig: Vec<u32> = Vec::with_capacity(n * 2);
++    let mut new_at = vec![0usize; n + 1];
++    // Ops of `out` whose branch offset is still an index of `ops`, and the
++    // guards and returns that jump to the op after their call (by index of
++    // `ops` too).
++    let mut caller_branches = Vec::new();
++    let mut to_after: Vec<(usize, usize)> = Vec::new();
++    let mut guard_at: Vec<(usize, usize, usize)> = Vec::new();
++    let mut next = copies.iter().peekable();
++    for (i, op) in ops.iter().enumerate() {
++        new_at[i] = out.len();
++        let copy = match next.peek() {
++            Some(c) if c.at == i => next.next(),
++            _ => None,
++        };
++        let Some(c) = copy else {
++            if matches!(op, Op::Jump { .. } | Op::PopJump { .. } | Op::IfTrue { .. } | Op::IfFalse { .. }) {
++                caller_branches.push(out.len());
++            }
++            out.push(*op);
++            orig.push(i as u32);
++            continue;
++        };
++        let b = depth[i] as usize - c.n - 1;
++        let base = (nl + b) as u32;
++        guard_at.push((out.len(), i, c.expect as usize));
++        out.push(*op);
++        orig.push(i as u32);
++        macro_rules! push {
++            ($o:expr) => {{
++                out.push($o);
++                orig.push(NONE);
++            }};
++        }
++        for _ in c.n + 1..c.locals {
++            push!(Op::PushUndefined);
++        }
++        for (j, conv) in c.conv.iter().enumerate() {
++            if let Some(conv) = conv {
++                let index = base + 1 + j as u32;
++                push!(Op::GetLocal { index });
++                push!(*conv);
++                push!(Op::SetLocal { index });
++            }
++        }
++        // Where each callee op starts, and its branches to set once known.
++        let mut body_at = vec![0usize; c.body.len()];
++        let mut body_branches = Vec::new();
++        for (k, op) in c.body.iter().enumerate() {
++            body_at[k] = out.len();
++            if c.depth[k] == u32::MAX {
++                // Unreachable in the callee, so here: never run.
++                push!(Op::Nop);
++                continue;
++            }
++            // The callee's stack depth here, on top of its locals.
++            let r = c.depth[k] as usize;
++            match *op {
++                Op::GetLocal { index } => push!(Op::GetLocal { index: base + index }),
++                Op::SetLocal { index } => push!(Op::SetLocal { index: base + index }),
++                Op::StoreLocal { index } => push!(Op::StoreLocal { index: base + index }),
++                Op::Kill { index } => push!(Op::Kill { index: base + index }),
++                Op::IncLocal { index } => push!(Op::IncLocal { index: base + index }),
++                Op::IncLocalI { index } => push!(Op::IncLocalI { index: base + index }),
++                Op::DecLocal { index } => push!(Op::DecLocal { index: base + index }),
++                Op::DecLocalI { index } => push!(Op::DecLocalI { index: base + index }),
++                Op::IfTrue { .. } | Op::IfFalse { .. } | Op::Jump { .. } => {
++                    body_branches.push(out.len());
++                    push!(*op);
++                }
++                Op::ReturnValue { return_type } => {
++                    if let Some(class) = return_type {
++                        push!(coerce_op(class));
++                    }
++                    push!(Op::SetLocal { index: base });
++                    for _ in 0..c.locals + r - 1 - c.push as usize {
++                        push!(Op::Pop);
++                    }
++                    to_after.push((out.len(), i));
++                    push!(Op::Jump { offset: 0 });
++                }
++                Op::ReturnVoid { return_type } => {
++                    if c.push {
++                        push!(match return_type {
++                            Some(class) if class.is_builtin_numeric() => Op::PushInt { value: 0 },
++                            Some(class) if class.is_builtin_boolean() => Op::PushFalse,
++                            Some(class) if !class.is_builtin_void() => Op::PushNull,
++                            _ => Op::PushUndefined,
++                        });
++                        push!(Op::SetLocal { index: base });
++                    }
++                    for _ in 0..c.locals + r - c.push as usize {
++                        push!(Op::Pop);
++                    }
++                    to_after.push((out.len(), i));
++                    push!(Op::Jump { offset: 0 });
++                }
++                other => push!(other),
++            }
++        }
++        for at in body_branches {
++            let to = match &mut out[at] {
++                Op::IfTrue { offset } | Op::IfFalse { offset } | Op::Jump { offset } => offset,
++                _ => unreachable!(),
++            };
++            *to = body_at[*to];
++        }
++    }
++    new_at[n] = out.len();
++    for at in caller_branches {
++        match &mut out[at] {
++            Op::Jump { offset } | Op::PopJump { offset } | Op::IfTrue { offset } | Op::IfFalse { offset } => {
++                *offset = new_at[*offset];
++            }
++            _ => unreachable!(),
++        }
++    }
++    for (at, call) in to_after {
++        out[at] = Op::Jump { offset: new_at[call + 1] };
++    }
++    let mut guards = FnvHashMap::default();
++    let mut expect = vec![0usize; out.len()];
++    for (g, call, callee) in guard_at {
++        guards.insert(g, new_at[call + 1]);
++        expect[g] = callee;
++    }
++    (out, orig, guards, expect)
++}
++
 +fn compile(s: &mut State, method: Method<'_>) -> Result<usize, String> {
 +    init(s);
 +    if s.init != 1 {
@@ -2949,56 +3386,104 @@ index 000000000..95d62ee9f
 +    if !info.exceptions.is_empty() {
 +        return Err("try/catch".into());
 +    }
-+    let ops = &info.parsed_code;
++    let ops0 = &info.parsed_code;
 +    let body = method.body().ok_or("no body")?;
 +    let nl = body.num_locals as usize;
 +    let ms = body.max_stack as usize;
-+    let n = ops.len();
-+    if n == 0 || n > 0xFFFF || nl + ms > 2000 {
++    if ops0.is_empty() || ops0.len() > 0xFFFF || nl + ms > 2000 {
 +        return Err("size".into());
 +    }
 +
-+    let (depth, target) = shape(ops, ms)?;
++    let none = FnvHashMap::default();
++    let (depth0, target0) = shape(ops0, ms, &none)?;
++    // The callees seen at its calls, copied in (`splice`). Not with a
++    // `lookupswitch`: its targets are in a `Gc` the interpreter shares.
++    let copies = if INLINE.load(AtomicOrdering::Relaxed)
++        && !ops0.iter().any(|op| matches!(op, Op::LookupSwitch(_)))
++    {
++        plan_inlines(s, method, ops0, &depth0)
++    } else {
++        Vec::new()
++    };
++    struct Spliced<'gc> {
++        ops: Vec<Op<'gc>>,
++        orig: Vec<u32>,
++        guards: FnvHashMap<usize, usize>,
++        expect: Vec<usize>,
++        depth: Vec<u32>,
++        target: Vec<bool>,
++        /// Stack slots it needs: its own and its copies'.
++        stack: usize,
++    }
++    let spliced = if copies.is_empty() {
++        None
++    } else {
++        let (ops, orig, guards, expect) = splice(ops0, &depth0, nl, &copies);
++        match shape(&ops, ms + INLINE_MAX_STACK, &guards) {
++            Ok((depth, target)) if ops.len() <= 0xFFFF => {
++                let top = depth.iter().filter(|&&d| d != u32::MAX).map(|&d| d as usize + 1).max().unwrap_or(0);
++                let stack = top.max(ms);
++                Some(Spliced { ops, orig, guards, expect, depth, target, stack })
++            }
++            Ok(_) => {
++                *s.inl_refused.entry("caller size".into()).or_insert(0) += 1;
++                None
++            }
++            Err(e) => {
++                *s.inl_refused.entry(format!("shape {e}")).or_insert(0) += 1;
++                None
++            }
++        }
++    };
++    let (ops, depth, target, guards, stack): (&[Op<'_>], &[u32], &[bool], &FnvHashMap<usize, usize>, usize) =
++        match &spliced {
++            Some(sp) => (&sp.ops, &sp.depth, &sp.target, &sp.guards, sp.stack),
++            None => (ops0, &depth0, &target0, &none, ms),
++        };
++    if nl + stack > 2000 {
++        return Err("size".into());
++    }
 +    let lay = s.layout.clone();
 +    let cache = TOS_CACHE.load(AtomicOrdering::Relaxed);
 +    let cb = CROSSBRIDGE.load(AtomicOrdering::Relaxed);
 +    let scopes = if cb { this_scopes(ops) } else { 0 };
 +    // Ints out of their `Value`s (`Typer`): every frame offset within reach
 +    // of `ldr w` (16 KB).
-+    let types = if cb && INTS.load(AtomicOrdering::Relaxed) && lay.words_ok && (nl + ms) * 16 + 32 < 16384 {
-+        let mut entry = vec![Ty::Any; nl];
-+        for (k, p) in method.resolved_param_config().iter().enumerate() {
-+            if let (Some(class), Some(t)) = (p.param_type, entry.get_mut(k + 1)) {
-+                *t = if class.is_builtin_int() {
-+                    Ty::Int
-+                } else if class.is_builtin_number() {
-+                    Ty::Num
-+                } else if class.is_builtin_boolean() {
-+                    Ty::Bool
-+                } else {
-+                    Ty::Any
-+                };
-+            }
++    let typing = cb && INTS.load(AtomicOrdering::Relaxed) && lay.words_ok && (nl + stack) * 16 + 32 < 16384;
++    let mut entry = vec![Ty::Any; nl];
++    for (k, p) in method.resolved_param_config().iter().enumerate() {
++        if let (Some(class), Some(t)) = (p.param_type, entry.get_mut(k + 1)) {
++            *t = if class.is_builtin_int() {
++                Ty::Int
++            } else if class.is_builtin_number() {
++                Ty::Num
++            } else if class.is_builtin_boolean() {
++                Ty::Bool
++            } else {
++                Ty::Any
++            };
 +        }
-+        analyze(ops, &depth, &target, &entry)
-+    } else {
-+        None
-+    };
++    }
++    let types = if typing { analyze(ops, depth, target, &entry, guards) } else { None };
 +    let check = CHECK.load(AtomicOrdering::Relaxed);
 +    let (main, main_labels, main_exit, typed) =
-+        emit(&lay, ops, &depth, &target, nl, cache, scopes, cb, types.as_ref(), check)?;
++        emit(&lay, ops, depth, target, nl, cache, scopes, cb, types.as_ref(), check, guards)?;
 +    s.typed_ops += typed;
 +    s.all_ops += depth.iter().filter(|&&d| d != u32::MAX).count() as u64;
-+    // The profiling build's A/B: the same code, its ints in `Value`s.
-+    let alt = if DUAL.load(AtomicOrdering::Relaxed) {
-+        let (code, labels, exit, _) = emit(&lay, ops, &depth, &target, nl, cache, scopes, cb, None, false)?;
++    // The profiling build's A/B: the same method without its copied
++    // callees, as it compiled before them (`ALT`).
++    let alt = if DUAL.load(AtomicOrdering::Relaxed) && spliced.is_some() {
++        let types0 = if typing { analyze(ops0, &depth0, &target0, &entry, &none) } else { None };
++        let (code, labels, exit, _) =
++            emit(&lay, ops0, &depth0, &target0, nl, cache, scopes, cb, types0.as_ref(), check, &none)?;
 +        Some((code, labels, exit))
 +    } else {
 +        None
 +    };
 +
 +    // A 16-byte header (the address of the code `ALT` runs: the second
-+    // compilation, or this one when there is none), the code, the other code.
++    // compilation, or this one when there is none; then the `CodeInfo` of
++    // its copied callees, or null), the code, the other code.
 +    let main_bytes = (main.len() * 4 + 15) & !15;
 +    let alt_bytes = alt.as_ref().map_or(0, |a| a.0.len() * 4);
 +    let total = 16 + main_bytes + alt_bytes;
@@ -3007,9 +3492,31 @@ index 000000000..95d62ee9f
 +    }
 +    let addr = s.rx as usize + s.used + 16;
 +    let alt_addr = if alt.is_some() { addr + main_bytes } else { addr };
++    let info: *const CodeInfo = match &spliced {
++        Some(sp) => {
++            s.inl_sites += copies.len() as u64;
++            s.inl_methods += 1;
++            // Frames of this method from now on have room for the copies;
++            // `run_compiled` interprets one taken before.
++            method.set_flashnx_frame_extra(sp.stack - ms);
++            let info = Box::new(CodeInfo {
++                // The ops' `Gc`s are the method's and its callees', which it
++                // keeps alive (`flashnx_sites`).
++                ops: unsafe { std::mem::transmute::<Vec<Op<'_>>, Vec<Op<'static>>>(sp.ops.clone()) },
++                orig: sp.orig.clone(),
++                expect: sp.expect.clone(),
++                frame: nl + sp.stack,
++            });
++            let p = &*info as *const CodeInfo;
++            s.infos.push(info);
++            p
++        }
++        None => std::ptr::null(),
++    };
 +    unsafe {
 +        let base = s.rw.add(s.used);
 +        (base as *mut usize).write(alt_addr);
++        (base.add(8) as *mut usize).write(info as usize);
 +        std::ptr::copy_nonoverlapping(main.as_ptr() as *const u8, base.add(16), main.len() * 4);
 +        if let Some((code, _, _)) = &alt {
 +            std::ptr::copy_nonoverlapping(code.as_ptr() as *const u8, base.add(16 + main_bytes), alt_bytes);
@@ -3030,10 +3537,10 @@ index 000000000..95d62ee9f
 +        crate::avm2::function::display_function(&mut name, method);
 +        let name = name.to_utf8_lossy().replace(char::is_whitespace, "_");
 +        s.map.push((addr, format!("@ {name}")));
-+        push_map(s, addr, ops, &depth, &main_labels, main_exit);
++        push_map(s, addr, ops, depth, &main_labels, main_exit);
 +        if let Some((_, labels, exit)) = &alt {
 +            s.map.push((alt_addr, format!("@ {name}")));
-+            push_map(s, alt_addr, ops, &depth, labels, *exit);
++            push_map(s, alt_addr, ops0, &depth0, labels, *exit);
 +        }
 +    }
 +    Ok(addr)
@@ -3146,7 +3653,13 @@ index 000000000..95d62ee9f
 +/// addresses and C ints: `add`, then `convert_i` or `li16`. Upstream's draft
 +/// int interpreter (ruffle#23864) proves the same kinds of facts from its
 +/// optimizer's types.
-+fn analyze(ops: &[Op<'_>], depth: &[u32], target: &[bool], entry: &[Ty]) -> Option<Types> {
++fn analyze(
++    ops: &[Op<'_>],
++    depth: &[u32],
++    target: &[bool],
++    entry: &[Ty],
++    guards: &FnvHashMap<usize, usize>,
++) -> Option<Types> {
 +    #[derive(Clone)]
 +    struct S {
 +        stack: Vec<Ty>,
@@ -3208,6 +3721,17 @@ index 000000000..95d62ee9f
 +            let (pops, pushes) = effect(op)?;
 +            if d < pops {
 +                return None;
++            }
++            // A guard (`splice`): the call's result, of any type, where the
++            // code goes on; the copied callee next, the stack untouched.
++            if let Some(&cont) = guards.get(&i) {
++                let mut after = s.clone();
++                after.stack.truncate(d - pops);
++                after.stack.resize(d - pops + pushes, Any);
++                if cont < n && merge(&mut entry_of[cont], &after) && cont <= i {
++                    again = true;
++                }
++                continue;
 +            }
 +            let top = if d >= 1 { s.stack[d - 1] } else { Any };
 +            let second = if d >= 2 { s.stack[d - 2] } else { Any };
@@ -3316,6 +3840,12 @@ index 000000000..95d62ee9f
 +        }
 +        fresh = false;
 +        let op = &ops[i];
++        // Both ways out of a guard are branch targets: what it takes is read
++        // by nothing this pass follows.
++        if guards.contains_key(&i) {
++            fresh = true;
++            continue;
++        }
 +        let (pops, pushes) = effect(op)?;
 +        let (b, ar) = {
 +            // Operand k (0: the top): (bits, a true int rather than 32 bits).
@@ -4133,6 +4663,7 @@ index 000000000..95d62ee9f
 +    cb: bool,
 +    types: Option<&Types>,
 +    check: bool,
++    guards: &FnvHashMap<usize, usize>,
 +) -> Result<(Vec<u32>, Vec<usize>, usize, u64), String> {
 +    let n = ops.len();
 +    let slot = |d: usize| (nl + d) * 16;
@@ -4815,6 +5346,16 @@ index 000000000..95d62ee9f
 +                let done = a.here();
 +                a.set(to_done, done);
 +            }
++            Op::CallMethod { num_args, push_return_value, .. } if guards.contains_key(&i) => {
++                // The callee seen here while interpreted follows this op
++                // (`splice`): it runs when the receiver's method is that one
++                // (`h_guard`); the call runs otherwise, then goes on after it.
++                a.call(H_GUARD, d, i, 0, false);
++                a.branch(Fix::Cb(false, 0), Target::Op(i + 1));
++                let post = d - 1 - *num_args as usize + *push_return_value as usize;
++                a.call(H_CALL, d, i, post, true);
++                a.branch(Fix::B, Target::Op(guards[&i]));
++            }
 +            Op::CallMethod { num_args, push_return_value, .. } => {
 +                let post = d - 1 - *num_args as usize + *push_return_value as usize;
 +                a.call(H_CALL, d, i, post, true);
@@ -4906,7 +5447,10 @@ index 000000000..95d62ee9f
 +            } else {
 +                // `effect` is wrong for this op: the interpreter's own stack
 +                // pointer is right, so it takes over at the next op.
-+                c.resume_ip = idx as usize + 1;
++                c.resume_ip = match unsafe { orig_ip(c, idx as usize) } {
++                    usize::MAX => usize::MAX,
++                    o => o + 1,
++                };
 +                let s = state();
 +                s.deopts += 1;
 +                let name = op_name(unsafe { &*c.ops.add(idx as usize) });
@@ -5011,11 +5555,38 @@ index 000000000..95d62ee9f
 +        let c = &mut *ctx;
 +        let act = &mut *c.act;
 +        act.stack.set_stack_pointer(c.num_locals + depth as usize);
-+        c.resume_ip = idx as usize;
++        c.resume_ip = orig_ip(c, idx as usize);
 +        let s = state();
 +        s.deopts += 1;
 +        *s.deopt_ops.entry("typed".into()).or_insert(0) += 1;
 +        3
++    }
++}
++
++/// The guard of a callee copied in place (`splice`): 0 when the receiver's
++/// method at the call's vtable index is the callee seen while interpreted
++/// (`CodeInfo::expect`), the one `call_method_with_args` would run (a bound
++/// method of it is that same method); 1 to make the call.
++unsafe extern "C" fn h_guard(ctx: *mut Ctx, depth: u32, idx: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let (index, n) = match &*c.ops.add(idx as usize) {
++            Op::CallMethod { index, num_args, .. } => (*index, *num_args as usize),
++            _ => unreachable!(),
++        };
++        let recv = *c.frame.add(c.num_locals + depth as usize - n - 1);
++        let info = &*c.info;
++        let expect = info.expect[idx as usize];
++        let s = state();
++        if let Value::Object(obj) = recv
++            && let Some(full) = obj.vtable().get_full_method(index)
++            && full.method.flashnx_key() == expect
++        {
++            s.inl_hits += 1;
++            return 0;
++        }
++        s.inl_misses += 1;
++        1
 +    }
 +}
 +
@@ -5279,6 +5850,7 @@ index 000000000..95d62ee9f
 +    t[H_TYPEFAIL] = h_typefail as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_GUARD] = h_guard as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +}
 +
 +// ---------------------------------------------------------------- entry
@@ -5290,7 +5862,9 @@ index 000000000..95d62ee9f
 +        return Outcome::Interpret;
 +    } else if st > 0xFFFF {
 +        st
-+    } else if st + 1 < THRESHOLD {
++    } else if st + 1 < THRESHOLD
++        || (st + 1 < INLINE_WAIT && INLINE.load(AtomicOrdering::Relaxed) && unseen_sites(method))
++    {
 +        cell.set(st + 1);
 +        return Outcome::Interpret;
 +    } else {
@@ -5323,16 +5897,29 @@ index 000000000..95d62ee9f
 +    let cell = method.flashnx_jit();
 +    // The profiling build's other A/B window: the code in the header (see
 +    // `compile`), which is this one when there is no second compilation.
-+    let code = if ALT.load(AtomicOrdering::Relaxed) {
++    let run = if ALT.load(AtomicOrdering::Relaxed) {
 +        unsafe { *((code - 16) as *const usize) }
 +    } else {
 +        code
 +    };
++    // Callees copied in place: the op list compiled, and a frame with room
++    // for them. A frame taken before the method got its room (the call that
++    // compiled it) runs in the interpreter, which does not need it. The
++    // second compilation has none: it is the method's own ops.
++    let info = if run == code { unsafe { *((code - 8) as *const *const CodeInfo) } } else { std::ptr::null() };
++    let ops = if info.is_null() {
++        method.get_verified_info().parsed_code.as_ptr()
++    } else {
++        if act.stack.flashnx_capacity() < unsafe { (*info).frame } {
++            return Outcome::Interpret;
++        }
++        unsafe { (*info).ops.as_ptr() as *const Op<'gc> }
++    };
++    let code = run;
 +    if let Err(e) = act.timeout_check() {
 +        return Outcome::Done(Err(e));
 +    }
 +    state().runs += 1;
-+    let ops = method.get_verified_info().parsed_code.as_ptr();
 +    let mut ctx = Ctx {
 +        frame: act.stack.base_ptr() as *mut Value<'static>,
 +        helpers: state().helpers.as_ptr(),
@@ -5346,6 +5933,7 @@ index 000000000..95d62ee9f
 +        num_locals: act.num_locals,
 +        result: None,
 +        resume_ip: 0,
++        info,
 +    };
 +    let status = unsafe {
 +        let f: unsafe extern "C" fn(*mut Ctx) -> u32 = std::mem::transmute(code);
@@ -5357,6 +5945,12 @@ index 000000000..95d62ee9f
 +            Outcome::Done(unsafe {
 +                std::mem::transmute::<Result<Value<'static>, Error<'static>>, Result<Value<'gc>, Error<'gc>>>(r)
 +            })
++        }
++        // Inside a copied callee there is no op of the method to go on at.
++        // Only a wrong `effect` or a wrong int proof gets here, never seen.
++        3 if ctx.resume_ip == usize::MAX => {
++            cell.set(REJECTED);
++            Outcome::Done(Err("FlashNX JIT: left compiled code inside a copied callee".into()))
 +        }
 +        3 => {
 +            cell.set(REJECTED);
@@ -5386,6 +5980,11 @@ index 000000000..95d62ee9f
 +    s.typefails = 0;
 +    s.typefail_ops.clear();
 +    s.map.clear();
++    // Its ops' `Gc`s were the previous player's: never read again.
++    s.infos.clear();
++    s.inl_sites = 0;
++    s.inl_methods = 0;
++    s.inl_refused.clear();
 +}
 +
 +/// Counters since the last call, then reset (the totals stay).
@@ -5438,6 +6037,19 @@ index 000000000..95d62ee9f
 +        s.typefails,
 +        top(&s.typefail_ops)
 +    );
++    // Callees copied in place (`splice`): sites and methods so far, guards
++    // since the last report.
++    let out = format!(
++        "{out}, inline {} ({} sites in {} methods, guards {} copy / {} call, not copied [{}])",
++        if INLINE.load(AtomicOrdering::Relaxed) { "on" } else { "off" },
++        s.inl_sites,
++        s.inl_methods,
++        s.inl_hits,
++        s.inl_misses,
++        top(&s.inl_refused)
++    );
++    s.inl_hits = 0;
++    s.inl_misses = 0;
 +    s.slow_why = [0; SLOW_WHY.len()];
 +    s.slow_names.clear();
 +    s.runs = 0;
@@ -5666,14 +6278,18 @@ index 000000000..95d62ee9f
 +    extern "C" fn flashnx_jit_flush(_: *mut u8, _: *mut u8, _: usize) {}
 +
 +    fn build(name: &str, ops: &[Op<'static>], entry: &[Ty], ms: usize) -> Types {
-+        let (depth, target) = shape(ops, ms).unwrap();
-+        let ty = analyze(ops, &depth, &target, entry).expect("analyze");
++        build_with(name, ops, entry, ms, &FnvHashMap::default())
++    }
++
++    fn build_with(name: &str, ops: &[Op<'static>], entry: &[Ty], ms: usize, guards: &FnvHashMap<usize, usize>) -> Types {
++        let (depth, target) = shape(ops, ms, guards).unwrap();
++        let ty = analyze(ops, &depth, &target, entry, guards).expect("analyze");
 +        let mut lay = Layout::default();
 +        probe_bool(&mut lay);
 +        probe_numbers(&mut lay);
 +        assert!(lay.words_ok);
 +        let (code, labels, exit, typed) =
-+            emit(&lay, ops, &depth, &target, entry.len(), true, 0, true, Some(&ty), true).unwrap();
++            emit(&lay, ops, &depth, &target, entry.len(), true, 0, true, Some(&ty), true, guards).unwrap();
 +        let dir = std::env::temp_dir().join("flashnx_jit_typed");
 +        std::fs::create_dir_all(&dir).unwrap();
 +        let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -5854,6 +6470,117 @@ index 000000000..95d62ee9f
 +        for k in 0..8 {
 +            assert!(t.wrap[first_add + k], "add {k}");
 +        }
++    }
++
++    /// `b2Math.b2Max(a:Number, b:Number):Number { return a > b ? a : b; }`.
++    fn b2max() -> CalleeCopy<'static> {
++        let body = std::vec![
++            GetLocal { index: 1 },
++            GetLocal { index: 2 },
++            GreaterThan,
++            IfFalse { offset: 6 },
++            GetLocal { index: 1 },
++            Jump { offset: 7 },
++            GetLocal { index: 2 },
++            ReturnValue { return_type: None },
++        ];
++        let (depth, _) = shape(&body, 2, &FnvHashMap::default()).unwrap();
++        CalleeCopy {
++            at: 0,
++            n: 2,
++            push: true,
++            body,
++            depth,
++            locals: 3,
++            conv: std::vec![Some(CoerceD), Some(CoerceD)],
++            expect: 0x1000,
++        }
++    }
++
++    /// The callee after its guard, run through `shape`, `analyze` and
++    /// `emit`: depths at each way out of a guard as the call leaves them,
++    /// returns that drop what the callee left below them, the method's ops
++    /// for each of its own, none for a callee's.
++    #[test]
++    fn callee_copied() {
++        // x = max(a, b); max(x, a) dropped; then a loop around a third.
++        let ops = [
++            GetLocal { index: 0 },
++            GetLocal { index: 1 },
++            GetLocal { index: 2 },
++            CallMethod { index: 5, num_args: 2, push_return_value: true },
++            SetLocal { index: 3 },
++            GetLocal { index: 0 },
++            GetLocal { index: 3 },
++            GetLocal { index: 1 },
++            CallMethod { index: 5, num_args: 2, push_return_value: false },
++            PushInt { value: 0 },
++            SetLocal { index: 4 },
++            GetLocal { index: 0 },
++            GetLocal { index: 4 },
++            GetLocal { index: 4 },
++            CallMethod { index: 6, num_args: 2, push_return_value: false },
++            IncLocalI { index: 4 },
++            GetLocal { index: 4 },
++            PushInt { value: 10 },
++            LessThan,
++            IfTrue { offset: 11 },
++            RET,
++        ];
++        let nl = 5;
++        let (depth, _) = shape(&ops, 3, &FnvHashMap::default()).unwrap();
++        let mut first = b2max();
++        first.at = 3;
++        let mut second = b2max();
++        second.at = 8;
++        second.push = false;
++        // `(a, b):void { a = a + b; }` with an int under its return.
++        let body = std::vec![
++            PushInt { value: 1 },
++            GetLocal { index: 1 },
++            GetLocal { index: 2 },
++            Add,
++            SetLocal { index: 1 },
++            ReturnVoid { return_type: None },
++            Nop,
++        ];
++        let (third_depth, _) = shape(&body, 3, &FnvHashMap::default()).unwrap();
++        let third = CalleeCopy {
++            at: 14,
++            n: 2,
++            push: false,
++            body,
++            depth: third_depth,
++            locals: 4,
++            conv: std::vec![None, None],
++            expect: 0x2000,
++        };
++        let (sops, orig, guards, expect) = splice(&ops, &depth, nl, &[first, second, third]);
++        assert_eq!(guards.len(), 3);
++        let (sdepth, starget) = shape(&sops, 3 + INLINE_MAX_STACK, &guards).unwrap();
++        for (&g, &cont) in &guards {
++            let Op::CallMethod { num_args, push_return_value, .. } = sops[g] else { panic!("guard {g}") };
++            let d = sdepth[g] as usize;
++            assert_eq!(sdepth[cont] as usize, d - num_args as usize - 1 + push_return_value as usize, "after {g}");
++            assert_eq!(sdepth[g + 1] as usize, d, "into {g}");
++            assert!(starget[g + 1] && starget[cont]);
++            assert_ne!(expect[g], 0);
++            // On after the call: the method's op after it.
++            assert_eq!(orig[cont], orig[g] + 1);
++        }
++        // Every op of the method is there, in order, once.
++        let mine: Vec<u32> = orig.iter().copied().filter(|&o| o != u32::MAX).collect();
++        assert_eq!(mine, (0..ops.len() as u32).collect::<Vec<_>>());
++        // The loop goes back to its own start.
++        let back = sops.iter().position(|op| matches!(op, IfTrue { .. })).unwrap();
++        let IfTrue { offset } = sops[back] else { unreachable!() };
++        assert_eq!(orig[offset], 11);
++        // The callee's locals are the caller's slots above its own locals.
++        assert!(sops.iter().any(|op| matches!(op, GetLocal { index } if *index >= nl as u32)));
++        let mut entry = std::vec![Ty::Any; nl];
++        entry[1] = Ty::Num;
++        entry[2] = Ty::Num;
++        build_with("inline", &sops, &entry, 3 + INLINE_MAX_STACK, &guards);
 +    }
 +}
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
@@ -7729,19 +8456,21 @@ index 23ae3533b..81df1bfb8 100644
      }
  
 diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
-index dcbb88f37..debe196cb 100644
+index dcbb88f37..1870b3468 100644
 --- a/core/src/avm2/method.rs
 +++ b/core/src/avm2/method.rs
-@@ -11,7 +11,7 @@ use crate::string::AvmString;
+@@ -10,8 +10,8 @@ use crate::avm2::verify::VerifiedMethodInfo;
+ use crate::string::AvmString;
  use crate::tag_utils::SwfMovie;
  use gc_arena::barrier::{Write, unlock};
- use gc_arena::lock::OnceLock;
+-use gc_arena::lock::OnceLock;
 -use gc_arena::{Collect, Gc};
++use gc_arena::lock::{OnceLock, RefLock};
 +use gc_arena::{Collect, Gc, Mutation};
  use std::borrow::Cow;
  use std::rc::Rc;
  use std::sync::Arc;
-@@ -136,6 +136,11 @@ struct MethodData<'gc> {
+@@ -136,6 +136,23 @@ struct MethodData<'gc> {
      /// This is true when the method is a free-standing function and none of the
      /// declared arguments have a type or a default value.
      is_unchecked: bool,
@@ -7750,10 +8479,22 @@ index dcbb88f37..debe196cb 100644
 +    /// of the compiled code, or `usize::MAX` once rejected.
 +    #[collect(require_static)]
 +    flashnx_jit: std::cell::Cell<usize>,
++
++    /// FlashNX: the method each `callmethod` of this one was seen calling
++    /// while it was interpreted, by op index; `None` once two different ones
++    /// were seen there. The JIT copies a small callee into the call site
++    /// (`activation_jit::plan_inlines`). Traced: the compiled code compares
++    /// receivers against these methods, which must outlive it.
++    flashnx_sites: RefLock<fnv::FnvHashMap<u32, Option<Method<'gc>>>>,
++
++    /// FlashNX: stack slots the JIT's copies of callees need on top of the
++    /// body's own (`Stack::get_stack_frame`).
++    #[collect(require_static)]
++    flashnx_frame_extra: std::cell::Cell<usize>,
  }
  
  impl PartialEq for Method<'_> {
-@@ -153,6 +158,16 @@ impl core::fmt::Debug for Method<'_> {
+@@ -153,6 +170,46 @@ impl core::fmt::Debug for Method<'_> {
  }
  
  impl<'gc> Method<'gc> {
@@ -7767,14 +8508,46 @@ index dcbb88f37..debe196cb 100644
 +        &self.0.flashnx_jit
 +    }
 +
++    /// FlashNX: op `site` of this method, a `callmethod`, called `callee`.
++    pub fn flashnx_observe(self, mc: &Mutation<'gc>, site: u32, callee: Method<'gc>) {
++        if let Some(Some(seen)) = self.0.flashnx_sites.borrow().get(&site)
++            && *seen == callee
++        {
++            return;
++        }
++        let sites = unlock!(Gc::write(mc, self.0), MethodData, flashnx_sites);
++        let mut sites = sites.borrow_mut();
++        let seen = sites.entry(site).or_insert(Some(callee));
++        if *seen != Some(callee) {
++            *seen = None;
++        }
++    }
++
++    /// FlashNX: what `flashnx_observe` saw at op `site`: nothing yet, one
++    /// method (`Some(Some)`), or more than one (`Some(None)`).
++    pub fn flashnx_site(self, site: u32) -> Option<Option<Method<'gc>>> {
++        self.0.flashnx_sites.borrow().get(&site).copied()
++    }
++
++    /// FlashNX: extra stack slots of this method's frames (see the field).
++    pub fn flashnx_frame_extra(self) -> usize {
++        self.0.flashnx_frame_extra.get()
++    }
++
++    pub fn set_flashnx_frame_extra(self, extra: usize) {
++        self.0.flashnx_frame_extra.set(extra);
++    }
++
      /// Construct a `Method` from an `AbcFile` and method index.
      pub fn from_method_index(
          txunit: TranslationUnit<'gc>,
-@@ -220,10 +235,38 @@ impl<'gc> Method<'gc> {
+@@ -220,10 +277,42 @@ impl<'gc> Method<'gc> {
                  association: OnceLock::new(),
                  is_function,
                  is_unchecked: is_function && all_params_unchecked,
 +                flashnx_jit: std::cell::Cell::new(0),
++                flashnx_sites: RefLock::new(fnv::FnvHashMap::default()),
++                flashnx_frame_extra: std::cell::Cell::new(0),
              },
          )))
      }
@@ -7802,6 +8575,8 @@ index dcbb88f37..debe196cb 100644
 +                is_function: data.is_function,
 +                is_unchecked: data.is_unchecked,
 +                flashnx_jit: std::cell::Cell::new(0),
++                flashnx_sites: RefLock::new(fnv::FnvHashMap::default()),
++                flashnx_frame_extra: std::cell::Cell::new(0),
 +            },
 +        ))
 +    }
@@ -8403,10 +9178,22 @@ index 8c4a1efa9..7734df5b4 100644
  
          let regex = match self.cached_regex.as_mut() {
 diff --git a/core/src/avm2/stack.rs b/core/src/avm2/stack.rs
-index 62ff9a7e9..b44604e72 100644
+index 62ff9a7e9..ff6cfa3be 100644
 --- a/core/src/avm2/stack.rs
 +++ b/core/src/avm2/stack.rs
-@@ -64,7 +64,18 @@ impl<'gc> Stack<'gc> {
+@@ -51,7 +51,10 @@ impl<'gc> Stack<'gc> {
+         let body = method
+             .body()
+             .expect("Cannot execute non-native method without body");
+-        let frame_size = body.max_stack as usize + body.num_locals as usize;
++        // FlashNX: plus the room the JIT's copies of callees take
++        // (`Method::flashnx_frame_extra`), operand stack like the rest.
++        let frame_size =
++            body.max_stack as usize + body.num_locals as usize + method.flashnx_frame_extra();
+ 
+         // Then actually create the stack frame
+         let stack_data = &self.0.stack;
+@@ -64,7 +67,18 @@ impl<'gc> Stack<'gc> {
          // Ensure the StackFrame returned to the caller does not have any
          // old values on it, as these may contain Gc pointers that have already
          // been collected.
@@ -8426,7 +9213,7 @@ index 62ff9a7e9..b44604e72 100644
              value.set(Value::Undefined);
          }
  
-@@ -136,6 +147,13 @@ impl<'a, 'gc> StackFrame<'a, 'gc> {
+@@ -136,6 +150,13 @@ impl<'a, 'gc> StackFrame<'a, 'gc> {
          &self.data[self.stack_pointer.get() - 1]
      }
  
@@ -8440,6 +9227,18 @@ index 62ff9a7e9..b44604e72 100644
      #[inline(always)]
      pub fn value_at(&self, index: usize) -> Value<'gc> {
          self.data[index].get()
+@@ -166,6 +187,11 @@ impl<'a, 'gc> StackFrame<'a, 'gc> {
+         self.stack_pointer.get()
+     }
+ 
++    /// FlashNX: locals and operand stack this frame has room for.
++    pub fn flashnx_capacity(&self) -> usize {
++        self.data.len()
++    }
++
+     /// Move out of this StackFrame, leaving it empty and creating a new StackFrame
+     /// that points to the same data as this one.
+     pub fn take(&mut self) -> Self {
 diff --git a/core/src/avm2/traits.rs b/core/src/avm2/traits.rs
 index 6b426cd78..f4a25d1eb 100644
 --- a/core/src/avm2/traits.rs
@@ -14391,7 +15190,7 @@ index 91bdb52df..d530d59b1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..ed57d1f69 100644
+index 6e5379213..98d77c74f 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -14404,7 +15203,7 @@ index 6e5379213..ed57d1f69 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,46 @@ extern crate num_derive;
+@@ -15,10 +18,47 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -14423,7 +15222,8 @@ index 6e5379213..ed57d1f69 100644
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use avm2::activation::{
 +    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_check,
-+    set_jit_crossbridge, set_jit_direct_calls, set_jit_ints, set_jit_map, set_jit_tos_cache,
++    set_jit_crossbridge, set_jit_direct_calls, set_jit_inline, set_jit_ints, set_jit_map,
++    set_jit_tos_cache,
 +};
 +pub use avm1::set_avm1_fast_push;
 +
@@ -14451,7 +15251,7 @@ index 6e5379213..ed57d1f69 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +65,10 @@ mod ecma_conversions;
+@@ -26,6 +66,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -14462,7 +15262,7 @@ index 6e5379213..ed57d1f69 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +106,18 @@ pub use events::PlayerEvent;
+@@ -63,6 +107,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
