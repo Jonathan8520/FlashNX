@@ -12274,7 +12274,7 @@ index c4f4a8880..a16dedb62 100644
              bounds,
          }
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..2457831b2 100644
+index baa4a03c5..5b26b2d21 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -12841,7 +12841,7 @@ index baa4a03c5..2457831b2 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2924,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,15 +2924,26 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -12862,7 +12862,14 @@ index baa4a03c5..2457831b2 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3019,6 +3317,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+-        if let Some(drawing) = self.drawing() {
++        if let Some(drawing) = self.drawing()
++            && drawing.reaches_screen(context)
++        {
+             drawing.render(context);
+         }
+         self.render_children(context);
+@@ -3019,6 +3319,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                              result = None;
                          }
                      }
@@ -12887,7 +12894,7 @@ index baa4a03c5..2457831b2 100644
                  } else if result.is_none() {
                      if let Some(child) = child.as_interactive() {
                          result = if !child.as_displayobject().movie().is_action_script_3() {
-@@ -3437,14 +3753,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3755,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -12906,7 +12913,7 @@ index baa4a03c5..2457831b2 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3879,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3881,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -12928,7 +12935,7 @@ index baa4a03c5..2457831b2 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3910,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3912,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -12938,7 +12945,7 @@ index baa4a03c5..2457831b2 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3934,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3936,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -12950,7 +12957,7 @@ index baa4a03c5..2457831b2 100644
                  width,
                  height,
              }),
-@@ -3842,7 +4165,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +4167,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -12960,7 +12967,7 @@ index baa4a03c5..2457831b2 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4292,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4294,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -13000,7 +13007,7 @@ index baa4a03c5..2457831b2 100644
  
          Ok(())
      }
-@@ -4937,7 +5285,7 @@ pub enum QueuedTagAction {
+@@ -4937,7 +5287,7 @@ pub enum QueuedTagAction {
  bitflags! {
      /// Boolean state flags used by `MovieClip`.
      #[derive(Clone, Copy)]
@@ -13009,7 +13016,7 @@ index baa4a03c5..2457831b2 100644
          /// Whether this `MovieClip` has run its initial frame.
          const INITIALIZED             = 1 << 0;
  
-@@ -4968,6 +5316,17 @@ bitflags! {
+@@ -4968,6 +5318,17 @@ bitflags! {
  
          /// Whether the AVM2 constructor of this `MovieClip` threw an error.
          const AVM2_CONSTRUCTOR_FAILED = 1 << 7;
@@ -13028,10 +13035,23 @@ index baa4a03c5..2457831b2 100644
  }
  
 diff --git a/core/src/display_object/stage.rs b/core/src/display_object/stage.rs
-index 46fe8deb6..a0ceb8585 100644
+index 46fe8deb6..cbc46d334 100644
 --- a/core/src/display_object/stage.rs
 +++ b/core/src/display_object/stage.rs
-@@ -857,6 +857,10 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
+@@ -457,6 +457,12 @@ impl<'gc> Stage<'gc> {
+         self.0.view_bounds.get()
+     }
+ 
++    /// FlashNX: stage to viewport, the first transform `render_viewport`
++    /// pushes (`Drawing::reaches_screen`).
++    pub fn viewport_matrix(self) -> Matrix {
++        self.0.viewport_matrix.get()
++    }
++
+     pub fn show_menu(self) -> bool {
+         self.0.show_menu.get()
+     }
+@@ -857,6 +863,10 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
  
      fn enter_frame(self, context: &mut UpdateContext<'gc>) {
          for child in self.iter_render_list() {
@@ -13042,7 +13062,7 @@ index 46fe8deb6..a0ceb8585 100644
              child.enter_frame(context);
          }
  
-@@ -865,6 +869,10 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
+@@ -865,6 +875,10 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
  
      fn construct_frame(self, context: &mut UpdateContext<'gc>) {
          for child in self.iter_render_list() {
@@ -13070,10 +13090,10 @@ index 7c7047526..45fe4f773 100644
          context: &mut UpdateContext<'gc>,
          swf: Arc<SwfMovie>,
 diff --git a/core/src/drawing.rs b/core/src/drawing.rs
-index 6a87ca93d..864314dca 100644
+index 6a87ca93d..2b05bc54f 100644
 --- a/core/src/drawing.rs
 +++ b/core/src/drawing.rs
-@@ -1,16 +1,19 @@
+@@ -1,18 +1,47 @@
  use crate::context::RenderContext;
 +use crate::tessellation_cache::{TessellationCache, render_scale};
  use ruffle_render::backend::{RenderBackend, ShapeHandle};
@@ -13083,9 +13103,30 @@ index 6a87ca93d..864314dca 100644
      DistilledShape, DrawCommand, DrawPath, FillRule, cubic_curve_bounds, quadratic_curve_bounds,
  };
 -use std::cell::OnceCell;
++use ruffle_render::matrix::Matrix;
 +use std::cell::{OnceCell, RefCell};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
  use swf::{FillStyle, LineStyle, Point, Rectangle, Twips};
  
++/// FlashNX: whether a sprite's drawing that cannot reach the screen is left
++/// out (`Drawing::reaches_screen`, #139). Off from FlashNX's `spritecull.off`
++/// marker, to compare.
++static SPRITE_CULL: AtomicBool = AtomicBool::new(true);
++static SPRITE_DRAWN: AtomicU64 = AtomicU64::new(0);
++static SPRITE_CULLED: AtomicU64 = AtomicU64::new(0);
++
++pub fn set_sprite_cull(enabled: bool) {
++    SPRITE_CULL.store(enabled, Ordering::Relaxed);
++}
++
++/// Sprite drawings drawn and left out off screen since the last call.
++pub fn take_sprite_cull_stats() -> (u64, u64) {
++    (
++        SPRITE_DRAWN.swap(0, Ordering::Relaxed),
++        SPRITE_CULLED.swap(0, Ordering::Relaxed),
++    )
++}
++
  #[derive(Clone, Debug)]
  pub struct Drawing {
      render_handle: OnceCell<ShapeHandle>,
@@ -13093,24 +13134,37 @@ index 6a87ca93d..864314dca 100644
 +    scaled_handle: RefCell<TessellationCache>,
      shape_bounds: Rectangle<Twips>,
      edge_bounds: Rectangle<Twips>,
++    /// FlashNX: the widest stroke that keeps its width whatever the scale
++    /// (`LineScaleMode.NONE` and friends). `shape_bounds` holds it at the
++    /// drawing's own scale, so on a shrunk sprite the stroke reaches further
++    /// on screen than the bounds say (`reaches_screen`).
++    unscaled_stroke: Twips,
      paths: Vec<DrawingPath>,
-@@ -35,6 +38,7 @@ impl Drawing {
+     bitmaps: Vec<BitmapInfo>,
+     current_fill: Option<DrawingFill>,
+@@ -35,8 +64,10 @@ impl Drawing {
      pub fn new() -> Self {
          Self {
              render_handle: OnceCell::new(),
 +            scaled_handle: RefCell::new(TessellationCache::new()),
              shape_bounds: Default::default(),
              edge_bounds: Default::default(),
++            unscaled_stroke: Twips::ZERO,
              paths: Vec::new(),
-@@ -52,6 +56,7 @@ impl Drawing {
+             bitmaps: Vec::new(),
+             current_fill: None,
+@@ -52,8 +83,10 @@ impl Drawing {
      pub fn from_swf_shape(shape: &swf::Shape) -> Self {
          let mut this = Self {
              render_handle: OnceCell::new(),
 +            scaled_handle: RefCell::new(TessellationCache::new()),
              shape_bounds: shape.shape_bounds,
              edge_bounds: shape.edge_bounds,
++            unscaled_stroke: Twips::ZERO,
              paths: Vec::new(),
-@@ -107,6 +112,7 @@ impl Drawing {
+             bitmaps: Vec::new(),
+             current_fill: None,
+@@ -107,6 +140,7 @@ impl Drawing {
      fn mark_dirty(&mut self) {
          self.is_empty = false;
          self.render_handle.take();
@@ -13118,7 +13172,14 @@ index 6a87ca93d..864314dca 100644
      }
  
      /// Set fill style and reset fill rule to default.
-@@ -163,6 +169,7 @@ impl Drawing {
+@@ -157,12 +191,14 @@ impl Drawing {
+         self.bitmaps.clear();
+         self.edge_bounds = Default::default();
+         self.shape_bounds = Default::default();
++        self.unscaled_stroke = Twips::ZERO;
+         self.cursor = Point::ZERO;
+         self.fill_start = Point::ZERO;
+         self.is_empty = true;
  
          // An empty drawing doesn't need to hold onto a `ShapeHandle`.
          self.render_handle.take();
@@ -13126,7 +13187,17 @@ index 6a87ca93d..864314dca 100644
      }
  
      pub fn set_line_style(&mut self, style: Option<LineStyle>) {
-@@ -245,84 +252,105 @@ impl Drawing {
+@@ -175,6 +211,9 @@ impl Drawing {
+             }
+         }
+         if let Some(style) = style {
++            if !style.allow_scale_x() || !style.allow_scale_y() {
++                self.unscaled_stroke = self.unscaled_stroke.max(style.width());
++            }
+             self.current_line = Some(DrawingLine {
+                 style,
+                 commands: vec![DrawCommand::MoveTo(self.cursor)],
+@@ -245,84 +284,149 @@ impl Drawing {
              return None;
          }
  
@@ -13215,12 +13286,7 @@ index 6a87ca93d..864314dca 100644
 +                }
              }
 +        }
- 
--            let shape = DistilledShape {
--                paths,
--                shape_bounds: self.shape_bounds,
--                edge_bounds: self.edge_bounds,
--                id: 0,
++
 +        if let Some(fill) = &self.current_fill {
 +            paths.push(DrawPath::Fill {
 +                style: &fill.style,
@@ -13230,6 +13296,26 @@ index 6a87ca93d..864314dca 100644
 +        }
 +
 +        for line in &self.pending_lines {
++            let mut commands = line.commands.to_owned();
++            let is_closed = if self.current_fill.is_some() {
++                commands.push(DrawCommand::LineTo(self.fill_start));
++                true
++            } else {
++                self.cursor == self.fill_start
++            };
++            paths.push(DrawPath::Stroke {
++                style: &line.style,
++                commands,
++                is_closed,
++            })
++        }
+ 
+-            let shape = DistilledShape {
+-                paths,
+-                shape_bounds: self.shape_bounds,
+-                edge_bounds: self.edge_bounds,
+-                id: 0,
++        if let Some(line) = &self.current_line {
 +            let mut commands = line.commands.to_owned();
 +            let is_closed = if self.current_fill.is_some() {
 +                commands.push(DrawCommand::LineTo(self.fill_start));
@@ -13247,21 +13333,6 @@ index 6a87ca93d..864314dca 100644
 +        }
  
 -        Some(handle.clone())
-+        if let Some(line) = &self.current_line {
-+            let mut commands = line.commands.to_owned();
-+            let is_closed = if self.current_fill.is_some() {
-+                commands.push(DrawCommand::LineTo(self.fill_start));
-+                true
-+            } else {
-+                self.cursor == self.fill_start
-+            };
-+            paths.push(DrawPath::Stroke {
-+                style: &line.style,
-+                commands,
-+                is_closed,
-+            })
-+        }
-+
 +        let shape = DistilledShape {
 +            paths,
 +            shape_bounds: self.shape_bounds,
@@ -13286,7 +13357,7 @@ index 6a87ca93d..864314dca 100644
 -                .render_shape(handle, context.transform_stack.transform());
 +        if self.is_empty {
 +            return;
-         }
++        }
 +        let transform = context.transform_stack.transform();
 +        let scale = render_scale(&transform.matrix);
 +        let cached = self.scaled_handle.borrow_mut().find_near_and_touch(scale);
@@ -13296,9 +13367,74 @@ index 6a87ca93d..864314dca 100644
 +            handle
 +        });
 +        context.commands.render_shape(handle, transform);
++    }
++
++    /// FlashNX (#139): whether this drawing, under the current render
++    /// transform, can touch the visible stage. Upstream leaves out off-screen
++    /// shapes, text, bitmaps and video this way, not a sprite's own drawing:
++    /// a Happy Wheels level is thousands of sprites drawn by code, all sent to
++    /// the GPU every frame, on screen or not (~4 000 draws, 36 % of the frame
++    /// on "$1000 TRIP"). Drawing into a bitmap, cacheAsBitmap and filters
++    /// (`is_offscreen`) keep everything, as upstream.
++    ///
++    /// The test runs in viewport space, on the transform `render` uses, so it
++    /// needs no walk up the parents. In f64: `Matrix * Rectangle<Twips>`
++    /// rounds into wrapping i32 twips, and a far-off corner wrapped around
++    /// would hide a drawing that is on screen. A non-finite transform is never
++    /// left out here: the backend decides what to do with it.
++    pub fn reaches_screen(&self, context: &RenderContext) -> bool {
++        if context.is_offscreen
++            || !SPRITE_CULL.load(Ordering::Relaxed)
++            || !self.shape_bounds.is_valid()
++        {
++            return true;
++        }
++        let stage = context.stage;
++        let viewport = stage.viewport_matrix();
++        let view = transformed_bounds(&viewport, &stage.view_bounds());
++        let bounds = transformed_bounds(&context.transform_stack.transform().matrix, &self.shape_bounds);
++        // `f64::min` skips NaN, so a NaN transform comes out as infinite bounds.
++        if !bounds.iter().chain(&view).all(|v| v.is_finite()) {
++            return true;
+         }
++        // Two pixels for hairlines and the one-pixel minimum our tessellator
++        // gives thin strokes (#137), plus a scale-proof stroke's full width.
++        let scale = (viewport.a.abs().max(viewport.d.abs())) as f64;
++        let margin = 40.0 + self.unscaled_stroke.get() as f64 * scale;
++        let off = bounds[0] > view[2] + margin
++            || bounds[2] < view[0] - margin
++            || bounds[1] > view[3] + margin
++            || bounds[3] < view[1] - margin;
++        if off {
++            SPRITE_CULLED.fetch_add(1, Ordering::Relaxed);
++        } else {
++            SPRITE_DRAWN.fetch_add(1, Ordering::Relaxed);
++        }
++        !off
      }
  
      pub fn self_bounds(&self) -> Rectangle<Twips> {
+@@ -449,6 +553,20 @@ enum DrawingPath {
+     Line(DrawingLine),
+ }
+ 
++/// `[x_min, y_min, x_max, y_max]` of `rect` through `matrix`, in f64 twips.
++fn transformed_bounds(matrix: &Matrix, rect: &Rectangle<Twips>) -> [f64; 4] {
++    let (a, b, c, d) = (matrix.a as f64, matrix.b as f64, matrix.c as f64, matrix.d as f64);
++    let (tx, ty) = (matrix.tx.get() as f64, matrix.ty.get() as f64);
++    let mut out = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
++    for x in [rect.x_min.get() as f64, rect.x_max.get() as f64] {
++        for y in [rect.y_min.get() as f64, rect.y_max.get() as f64] {
++            let (px, py) = (a * x + c * y + tx, b * x + d * y + ty);
++            out = [out[0].min(px), out[1].min(py), out[2].max(px), out[3].max(py)];
++        }
++    }
++    out
++}
++
+ fn stretch_bounds(
+     bounds: &Rectangle<Twips>,
+     command: &DrawCommand,
 diff --git a/core/src/flashnx_as3prof.rs b/core/src/flashnx_as3prof.rs
 new file mode 100644
 index 000000000..0a3e04218
@@ -14255,7 +14391,7 @@ index 91bdb52df..d530d59b1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..2f4c58190 100644
+index 6e5379213..ed57d1f69 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -14268,7 +14404,7 @@ index 6e5379213..2f4c58190 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,45 @@ extern crate num_derive;
+@@ -15,10 +18,46 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -14310,11 +14446,12 @@ index 6e5379213..2f4c58190 100644
 +    take_avm1_unloaded_skipped, take_inner_goto_stats, take_orphan_list_max, set_frame_orphan_queue,
 +};
 +pub use display_object::set_lazy_shapes;
++pub use drawing::{set_sprite_cull, take_sprite_cull_stats};
 +pub use display_object::{set_full_frame_skip, set_stage_skip, take_enter_skipped, take_subtrees_skipped};
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +64,10 @@ mod ecma_conversions;
+@@ -26,6 +65,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -14325,7 +14462,7 @@ index 6e5379213..2f4c58190 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +105,18 @@ pub use events::PlayerEvent;
+@@ -63,6 +106,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};

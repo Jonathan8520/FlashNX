@@ -16252,6 +16252,15 @@ impl RenderBackend for SwitchRenderBackend {
                         self.frame_count, gotos, list_skipped, run, skipped, subtrees_skipped, enter_skipped, avm1_unframed, unloaded_quiet, orphan_list, mouse_picks
                     ));
                 }
+                // Sprite drawings left out because they cannot reach the
+                // screen (#139, `spritecull.off`).
+                let (sprites_drawn, sprites_culled) = ruffle_core::take_sprite_cull_stats();
+                if sprites_culled > 0 {
+                    log_str(&std::format!(
+                        "cull: f{} last 300 frames: sprite drawings drawn {}, left out off screen {}\n",
+                        self.frame_count, sprites_drawn, sprites_culled
+                    ));
+                }
                 // Which event sounds were started, and how often: a sound
                 // restarted every frame, or one asked to loop forever.
                 let starts = ruffle_core::backend::audio::take_sound_start_stats();

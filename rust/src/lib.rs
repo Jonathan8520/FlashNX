@@ -1796,6 +1796,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !frame_orphans {
         log(b"gotos: frameorphans.off present -> full frames walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/spritecull.off`: a sprite's drawing is drawn even
+    // when it cannot reach the screen, as upstream (#139).
+    let sprite_cull = !backend::render::marker_present("spritecull.off");
+    ruffle_core::set_sprite_cull(sprite_cull);
+    if !sprite_cull {
+        log(b"cull: spritecull.off present -> off-screen sprite drawings are drawn\n\0");
+    }
     // `sdmc:/switch/FlashNX/avm1goto.off`: an AS2 gotoAndStop/nextFrame runs
     // the AS3 inner frame again, as upstream does (see
     // `explicit_goto_runs_inner_frame` in our Ruffle). Same kind of switch.
@@ -2524,15 +2531,16 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-08: the JIT's stack cache. Every method is compiled twice and
-    // window 0 runs the copy without it (`set_jit_ab`). Measured before with
-    // this switch: the collector's longer sleep on small heaps
+    // 2026-10-29: off-screen sprite drawings left out (#139), drawn in window
+    // 0. Measured before with this switch: typed ints in the JIT
+    // (`set_jit_ab`, every method compiled twice; nothing on Happy Wheels),
+    // the JIT's stack cache, the collector's longer sleep on small heaps
     // (`set_gc_small_pacing`, -2 ms a frame on Happy Wheels), AVM1 pushes
     // decoded without their Vec (`set_avm1_fast_push`, -10 % on an AS2 game),
     // the AVM2 JIT (`set_jit`, -17.5 ms a frame on Fireboy 2), direct calls
     // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
     // call path (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_jit_ab(true, regime == 0);
+    ruffle_core::set_sprite_cull(regime != 0);
     // Only this build calls here: keep the JIT's op address map, written to
     // the card when the game ends (`ruffle_shutdown`), so the profile can
     // name the ops behind its samples in compiled code.

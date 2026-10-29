@@ -230,6 +230,30 @@ registers it, at preload, as upstream does. On the console: the nets are
 back, and Papa Louie 3 peaked at 17 + 8 MB of shape arena against the
 32 + 15 MB its earlier sessions had recorded, at its usual speed.
 
+**`core/src/drawing.rs`, `display_object/movie_clip.rs`,
+`display_object/stage.rs`: a sprite's drawing that cannot reach the screen
+is left out (FlashNX #139).**
+
+Upstream leaves out off-screen shapes, text fields, bitmaps and video, and
+static text since ruffle#24944 (after our base), by comparing their world
+bounds with the stage's `view_bounds`. The drawing of a sprite or movie clip
+(the Graphics API) is never checked, so a Happy Wheels level, thousands of
+sprites drawn by code, sent every one of them to the GPU every frame.
+`Drawing::reaches_screen` now runs the same test before
+`MovieClip::render_self` draws it, in viewport space, on the transform the
+draw itself uses: no walk up the parents. In f64, because
+`Matrix * Rectangle<Twips>` wraps far-off corners around i32. Margin: 2 px,
+plus the widest stroke that keeps its width whatever the scale. Drawing into
+a bitmap, cacheAsBitmap and filters keep everything (`is_offscreen`), as
+upstream. FlashNX's `spritecull.off` marker draws them all again; a `cull:`
+line counts both every 300 frames.
+
+On the console, Happy Wheels' featured level "$1000 TRIP" at 1785 MHz, A/B
+in one session (240-frame windows): 83 to 97 % of the sprite drawings were
+off screen; draw calls 3 509 -> 324, render 15.9 -> 6.8 ms, frame 47.3 ->
+39.8 ms (medians). Nothing missing or late at the edges of the screen. Full
+suite: 4071 passed, the two known failures.
+
 **`core/src/display_object/movie_clip.rs`, `core/src/context.rs` — the
 movie's own script timeout.**
 
