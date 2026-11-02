@@ -880,6 +880,18 @@ are native (`Math.*`), longer or hold an op not copied (the `jit:` line names
 them). Left: a guard costs ~80 ns (the receiver, vtable and method reads
 remain), the other calls ~13 % of the frame.
 
+Then widened (2026-10-30): callees of up to 64 ops, and ops that read no
+activation state either, `CallMethod` and `CallNative` (they run as calls,
+their callees in their own activation), `GetScriptGlobals` (the op's script)
+and properties by name (`Get/SetPropertyStatic/Fast`). The `jit:` line had
+counted 76 sites refused for a call, 73 for script globals, 284 for size.
+~1 530 sites in ~330 methods, about twice the copies run. These copies carry
+a low bit in their expected method (`EXPECT_WIDE`) so the profiling build's
+A/B can send them to the call (`set_jit_inline_wide`): on "$1000 TRIP" the
+call path's own time went 3.6 -> 2.9 ms a frame (sampling profiler, by
+regime); still refused: natives, `ConstructSlot`, `GetOuterScope` (the
+callee's own scope, rightly).
+
 **`render/src/utils.rs`: `DefineBitsLossless` RGB32 pixels swizzled as a
 `u32` rotation.** `<[u8]>::rotate_left(1)` on each 4-byte pixel went through
 `ptr_rotate`'s memmove: 3.8 s of SMBC's startup (4 400 bitmaps); its first

@@ -1574,7 +1574,7 @@ index 563ffbb03..037b6c0c9 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..108f72b0e 100644
+index ed1ff3034..3cf3cb727 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -1587,7 +1587,7 @@ index ed1ff3034..108f72b0e 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,153 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,162 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -1674,6 +1674,15 @@ index ed1ff3034..108f72b0e 100644
 +    let _ = on;
 +}
 +
++/// FlashNX, profiling build: the copies of callees taken in on 2026-10-30
++/// run (on by default), see `activation_jit::INLINE_WIDE`.
++pub fn set_jit_inline_wide(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_inline_wide(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
 +/// FlashNX: compiled code keeps ints out of their `Value`s where it can
 +/// prove them (on by default; `jitint.off`), see `activation_jit::Typer`.
 +pub fn set_jit_ints(on: bool) {
@@ -1741,7 +1750,7 @@ index ed1ff3034..108f72b0e 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +283,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +292,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -1750,7 +1759,7 @@ index ed1ff3034..108f72b0e 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +307,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +316,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -1759,7 +1768,7 @@ index ed1ff3034..108f72b0e 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +362,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +371,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -1775,7 +1784,7 @@ index ed1ff3034..108f72b0e 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +496,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +505,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -1800,7 +1809,7 @@ index ed1ff3034..108f72b0e 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +598,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +607,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -1809,7 +1818,7 @@ index ed1ff3034..108f72b0e 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +679,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +688,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -1826,7 +1835,7 @@ index ed1ff3034..108f72b0e 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +813,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +822,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -1850,7 +1859,7 @@ index ed1ff3034..108f72b0e 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +837,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +846,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -1866,7 +1875,7 @@ index ed1ff3034..108f72b0e 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -678,7 +867,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -678,7 +876,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      index,
                      num_args,
                      push_return_value,
@@ -1879,7 +1888,7 @@ index ed1ff3034..108f72b0e 100644
                  Op::CallNative {
                      method,
                      num_args,
-@@ -946,12 +1139,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,12 +1148,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -1902,7 +1911,7 @@ index ed1ff3034..108f72b0e 100644
          }
          Ok(())
      }
-@@ -2023,6 +2225,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2234,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -1913,7 +1922,7 @@ index ed1ff3034..108f72b0e 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2278,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2287,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -1930,17 +1939,17 @@ index ed1ff3034..108f72b0e 100644
 +            (value1, value2) => {
 +                let value1 = value1.coerce_to_i32(self)?;
 +                let value2 = value2.coerce_to_i32(self)?;
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +                value1.wrapping_add(value2)
 +            }
 +        };
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +        self.push_stack(sum_value);
  
          Ok(())
      }
-@@ -2134,8 +2352,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2361,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1951,7 +1960,7 @@ index ed1ff3034..108f72b0e 100644
  
          Ok(())
      }
-@@ -2151,8 +2370,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2379,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1962,7 +1971,7 @@ index ed1ff3034..108f72b0e 100644
  
          Ok(())
      }
-@@ -2175,8 +2395,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2404,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1973,7 +1982,7 @@ index ed1ff3034..108f72b0e 100644
  
          Ok(())
      }
-@@ -2274,6 +2495,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2504,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1982,7 +1991,7 @@ index ed1ff3034..108f72b0e 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2511,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2520,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -2008,10 +2017,10 @@ index ed1ff3034..108f72b0e 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..016f6edec
+index 000000000..4cf8d60b8
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,4571 @@
+@@ -0,0 +1,4606 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -2109,8 +2118,22 @@ index 000000000..016f6edec
 +/// A method stays interpreted for up to this many calls while some of its
 +/// `callmethod`s have not run yet, so `plan_inlines` knows their callees.
 +const INLINE_WAIT: usize = 4;
-+/// The biggest callee copied, in ops.
-+const INLINE_MAX_OPS: usize = 40;
++/// The biggest callee copied, in ops. 40 left out 284 sites of Happy Wheels.
++const INLINE_MAX_OPS: usize = 64;
++/// Copies taken in on 2026-10-30, beyond the first ones: callees of more than
++/// `INLINE_FIRST_OPS` ops, or holding calls, script globals or properties
++/// by name (`wide`). Off, their guards make the call: the profiling build's
++/// A/B.
++const INLINE_FIRST_OPS: usize = 40;
++static INLINE_WIDE: AtomicBool = AtomicBool::new(true);
++
++pub fn set_inline_wide(on: bool) {
++    INLINE_WIDE.store(on, AtomicOrdering::Relaxed);
++}
++
++/// Low bit of `CodeInfo::expect` (a method's box address, 8-aligned): a
++/// copy `INLINE_WIDE` turns off.
++const EXPECT_WIDE: usize = 1;
 +/// Stack slots a method may grow by for its copies (`flashnx_frame_extra`).
 +const INLINE_MAX_STACK: usize = 64;
 +
@@ -3096,12 +3119,16 @@ index 000000000..016f6edec
 +}
 +
 +/// Ops a copied callee may hold: their result does not depend on the
-+/// activation running them, they do not call, and they never jump back.
++/// activation running them (its scopes, its domain), and they never jump
++/// back. The calls among them run as calls (`h_call_method`, natives), their
++/// callees in their own activation; the script globals are the op's.
 +fn copyable(op: &Op<'_>) -> bool {
 +    use Op::*;
 +    matches!(
 +        op,
-+        GetLocal { .. } | SetLocal { .. } | StoreLocal { .. } | Kill { .. } | IncLocal { .. }
++        CallMethod { .. } | CallNative { .. } | GetScriptGlobals { .. } | GetPropertyStatic { .. }
++            | GetPropertyFast { .. } | SetPropertyStatic { .. } | SetPropertyFast { .. }
++            | GetLocal { .. } | SetLocal { .. } | StoreLocal { .. } | Kill { .. } | IncLocal { .. }
 +            | IncLocalI { .. } | DecLocal { .. } | DecLocalI { .. } | PushDouble { .. } | PushFalse
 +            | PushInt { .. } | PushNull | PushString { .. } | PushTrue | PushUint { .. } | PushUndefined
 +            | Pop | Dup | Swap | Nop | Add | AddI | Subtract | SubtractI | Multiply | MultiplyI
@@ -3148,7 +3175,11 @@ index 000000000..016f6edec
 +}
 +
 +/// `callee` as a copy for a call with `n` arguments, or why not.
-+fn copy_of<'gc>(callee: Method<'gc>, n: usize) -> Result<(Vec<Op<'gc>>, Vec<u32>, usize, Vec<Option<Op<'gc>>>), String> {
++/// The `bool`: a copy `INLINE_WIDE` covers.
++fn copy_of<'gc>(
++    callee: Method<'gc>,
++    n: usize,
++) -> Result<(Vec<Op<'gc>>, Vec<u32>, usize, Vec<Option<Op<'gc>>>, bool), String> {
 +    let crate::avm2::method::MethodKind::Bytecode { verified_info } = callee.method_kind() else {
 +        return Err("native".into());
 +    };
@@ -3194,7 +3225,16 @@ index 000000000..016f6edec
 +        }
 +    }
 +    let (depth, _) = shape(ops, body.max_stack as usize, &FnvHashMap::default()).map_err(|_| "shape".to_string())?;
-+    Ok((ops.to_vec(), depth, locals, conv))
++    let wide = ops.len() > INLINE_FIRST_OPS
++        || ops.iter().any(|op| {
++            matches!(
++                op,
++                Op::CallMethod { .. } | Op::CallNative { .. } | Op::GetScriptGlobals { .. }
++                    | Op::GetPropertyStatic { .. } | Op::GetPropertyFast { .. } | Op::SetPropertyStatic { .. }
++                    | Op::SetPropertyFast { .. }
++            )
++        });
++    Ok((ops.to_vec(), depth, locals, conv, wide))
 +}
 +
 +/// The callees `observe` saw at `method`'s `callmethod`s that can be copied.
@@ -3211,7 +3251,7 @@ index 000000000..016f6edec
 +        }
 +        let n = *num_args as usize;
 +        match copy_of(callee, n) {
-+            Ok((body, depth, locals, conv)) => out.push(CalleeCopy {
++            Ok((body, depth, locals, conv, wide)) => out.push(CalleeCopy {
 +                at: i,
 +                n,
 +                push: *push_return_value,
@@ -3219,7 +3259,7 @@ index 000000000..016f6edec
 +                depth,
 +                locals,
 +                conv,
-+                expect: callee.flashnx_key(),
++                expect: callee.flashnx_key() | if wide { EXPECT_WIDE } else { 0 },
 +            }),
 +            Err(why) => *s.inl_refused.entry(why).or_insert(0) += 1,
 +        }
@@ -5577,6 +5617,10 @@ index 000000000..016f6edec
 +        let recv = *c.frame.add(c.num_locals + depth as usize - n - 1);
 +        let info = &*c.info;
 +        let expect = info.expect[idx as usize];
++        if expect & EXPECT_WIDE != 0 && !INLINE_WIDE.load(AtomicOrdering::Relaxed) {
++            return 1;
++        }
++        let expect = expect & !EXPECT_WIDE;
 +        let s = state();
 +        if let Value::Object(obj) = recv
 +            && let Some(full) = obj.vtable().get_full_method(index)
@@ -15296,7 +15340,7 @@ index 91bdb52df..d530d59b1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..321c241ef 100644
+index 6e5379213..91c907173 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -15328,8 +15372,8 @@ index 6e5379213..321c241ef 100644
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use avm2::activation::{
 +    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_check,
-+    set_jit_crossbridge, set_jit_direct_calls, set_jit_inline, set_jit_ints, set_jit_map,
-+    set_jit_tos_cache,
++    set_jit_crossbridge, set_jit_direct_calls, set_jit_inline, set_jit_inline_wide, set_jit_ints,
++    set_jit_map, set_jit_tos_cache,
 +};
 +pub use avm1::set_avm1_fast_push;
 +

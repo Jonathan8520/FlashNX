@@ -2545,9 +2545,11 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-30: off-screen sprites left out whole (`set_leaf_cull`), off in
-    // window 0 (#139; -0.6 ms of render on Happy Wheels). Measured before
-    // with this switch: the callee's flags read once (`set_jit_call_meta`,
+    // 2026-10-30: the copies of callees with calls, script globals or
+    // properties by name, or of 41 to 64 ops (`set_jit_inline_wide`), make
+    // the call in window 0 (#139). Measured before with this switch:
+    // off-screen sprites left out whole (`set_leaf_cull`, -0.6 ms of render
+    // on Happy Wheels), the callee's flags read once (`set_jit_call_meta`,
     // nothing measurable, taken out), small callees copied into
     // their callers (`set_jit_ab`, -2.1 ms on Happy Wheels), off-screen
     // sprite drawings left out (`set_sprite_cull`, render 15.9 -> 6.8 ms),
@@ -2558,7 +2560,7 @@ pub extern "C" fn ruffle_ab_regime(regime: i32) {
     // the AVM2 JIT (`set_jit`, -17.5 ms a frame on Fireboy 2), direct calls
     // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
     // call path (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_leaf_cull(regime != 0);
+    ruffle_core::set_jit_inline_wide(regime != 0);
     // Only this build calls here: keep the JIT's op address map, written to
     // the card when the game ends (`ruffle_shutdown`), so the profile can
     // name the ops behind its samples in compiled code.
