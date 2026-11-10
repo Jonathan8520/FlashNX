@@ -1193,6 +1193,37 @@ FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
   64-pixel steps, instead of matching sizes exactly: GPU-object creation
   spikes in SSF2 fell by about 60 %.
 
+**`core/src/display_object/edit_text.rs`, `avm2/globals/flash/text/engine/`
+(`TextLine.as`, `text_line.rs`, `text_block.rs`): an FTE `TextLine` has its
+baseline on its origin (FlashNX #142), `ftebase.off` to compare.**
+
+Our base draws a `TextLine` with an `EditText`, which draws its text from its
+top: the first baseline sat `GUTTER + ascent` below the line's origin. The
+Text Layout Framework places each line by its baseline (`createShapeY`:
+`textLine.y = line.y + ascent`), so every TLF line came out one line too low
+and was cut off by its container: Ben 10 Omniverse Collection's button labels
+sat under their buttons, its titles were empty. Same diagnosis as ruffle#25105
+(closed unmerged on 2026-11-05); upstream master still has it.
+
+- `create_text_line` calls `EditText::flashnx_place_fte_baseline`, which moves
+  the bounds up by `GUTTER + ascent` of the first laid-out line. It applies
+  the pending `autosize_lazy_bounds` first: `relayout` always stores a copy of
+  the bounds, autosize or not, and the next `x`/`y`/render put that copy
+  (from before the shift) back.
+- For an FTE line, `x`/`y` and their setters are the object's own position,
+  not offset by the bounds as a `TextField`'s are; otherwise `set_y` undid
+  the shift.
+- `TextLine.ascent`/`descent` are native and read the first laid-out line
+  (as upstream `39c0179b7`, on its own `TextLine` object), instead of 12 and
+  3; `totalAscent`/`totalDescent` return them. `getBaselinePosition` answers
+  `ascent`/`ideographicTop` with `-ascent`, `descent`/`ideographicBottom`
+  with `descent`, `ideographicCenter` with the middle, `roman` with 0, where
+  it always said 0: TLF's typographic ascent is `roman - ascent`.
+
+Ruffle's `avm2/text` (13) and `avm2/edittext` (66) tests pass unchanged.
+Validated on the console with Ben 10 Omniverse Collection (title, alien
+select, instructions).
+
 ### Tried and dropped (2026-10-08)
 
 - **Keeping the textures of emptied dedicated atlases for reuse** (FlashNX

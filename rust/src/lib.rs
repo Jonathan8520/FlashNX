@@ -2030,6 +2030,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !frame_orphans {
         log(b"gotos: frameorphans.off present -> full frames walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/ftebase.off`: an FTE TextLine draws its text from
+    // its top, one line too low, as upstream (#142).
+    let fte_base = !backend::render::marker_present("ftebase.off");
+    ruffle_core::set_fte_baseline(fte_base);
+    if !fte_base {
+        log(b"text: ftebase.off present -> FTE lines drawn from their top\n\0");
+    }
     // `sdmc:/switch/FlashNX/spritecull.off`: a sprite's drawing is drawn even
     // when it cannot reach the screen, as upstream (#139).
     let sprite_cull = !backend::render::marker_present("spritecull.off");

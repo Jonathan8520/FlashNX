@@ -8420,6 +8420,118 @@ index b02aecf7d..498fa59ab 100644
  /// Implements `flash.system.System.setClipboard` method
  pub fn set_clipboard<'gc>(
      activation: &mut Activation<'_, 'gc>,
+diff --git a/core/src/avm2/globals/flash/text/engine/TextLine.as b/core/src/avm2/globals/flash/text/engine/TextLine.as
+index 5c0acd373..7e512a730 100644
+--- a/core/src/avm2/globals/flash/text/engine/TextLine.as
++++ b/core/src/avm2/globals/flash/text/engine/TextLine.as
+@@ -48,26 +48,21 @@ package flash.text.engine {
+             return this._textBlock;
+         }
+ 
+-        public function get ascent():Number {
+-            stub_getter("flash.text.engine.TextLine", "ascent");
+-            return 12.0;
+-        }
++        // FlashNX (#142): the laid-out line's own metrics (upstream 39c0179b7).
++        public native function get ascent():Number;
+ 
+         [API("670")]
+         public function get totalAscent():Number {
+             stub_getter("flash.text.engine.TextLine", "totalAscent");
+-            return 12.0;
++            return this.ascent;
+         }
+ 
+-        public function get descent():Number {
+-            stub_getter("flash.text.engine.TextLine", "descent");
+-            return 3.0;
+-        }
++        public native function get descent():Number;
+ 
+         [API("670")]
+         public function get totalDescent():Number {
+             stub_getter("flash.text.engine.TextLine", "totalDescent");
+-            return 3.0;
++            return this.descent;
+         }
+ 
+         public function get unjustifiedTextWidth():Number {
+@@ -106,9 +101,22 @@ package flash.text.engine {
+             return null;
+         }
+ 
++        // FlashNX (#142): every baseline relative to the roman one, which
++        // sits on the line's origin; the ideographic ones are placed on the
++        // line's ascent and descent rather than on the em box.
+         public function getBaselinePosition(baseline:String):Number {
+-            stub_method("flash.text.engine.TextLine", "getBaselinePosition");
+-            return 0.0;
++            switch (baseline) {
++                case "ascent":
++                case "ideographicTop":
++                    return -this.ascent;
++                case "descent":
++                case "ideographicBottom":
++                    return this.descent;
++                case "ideographicCenter":
++                    return (this.descent - this.ascent) / 2;
++                default:
++                    return 0.0;
++            }
+         }
+ 
+         public function get hasTabs():Boolean {
+diff --git a/core/src/avm2/globals/flash/text/engine/text_block.rs b/core/src/avm2/globals/flash/text/engine/text_block.rs
+index 3a23ec9d1..48b0e109d 100644
+--- a/core/src/avm2/globals/flash/text/engine/text_block.rs
++++ b/core/src/avm2/globals/flash/text/engine/text_block.rs
+@@ -83,6 +83,8 @@ pub fn create_text_line<'gc>(
+     let element_format = content.get_slot(element_slots::_ELEMENT_FORMAT).as_object();
+ 
+     apply_format(activation, display_object, text.as_wstr(), element_format)?;
++    // FlashNX (#142): the line's baseline on its origin, as in Flash.
++    display_object.flashnx_place_fte_baseline();
+ 
+     let instance = initialize_for_allocator(activation.context, display_object.into(), class);
+ 
+diff --git a/core/src/avm2/globals/flash/text/engine/text_line.rs b/core/src/avm2/globals/flash/text/engine/text_line.rs
+index 0137e9084..e28a68870 100644
+--- a/core/src/avm2/globals/flash/text/engine/text_line.rs
++++ b/core/src/avm2/globals/flash/text/engine/text_line.rs
+@@ -29,3 +29,33 @@ pub fn get_text_height<'gc>(
+     let measured_text = edit_text.measure_text(activation.context);
+     Ok(measured_text.1.to_pixels().into())
+ }
++
++/// FlashNX (#142): the first laid-out line's ascent, in pixels, where the
++/// stub always said 12 (same as upstream `39c0179b7`).
++pub fn get_ascent<'gc>(
++    _activation: &mut Activation<'_, 'gc>,
++    this: Value<'gc>,
++    _args: &[Value<'gc>],
++) -> Result<Value<'gc>, Error<'gc>> {
++    let this = this.as_object().unwrap();
++
++    let display_object = this.as_display_object().unwrap();
++    let edit_text = display_object.as_edit_text().unwrap();
++
++    Ok(edit_text.flashnx_fte_metrics().0.into())
++}
++
++/// FlashNX (#142): the first laid-out line's descent, in pixels, where the
++/// stub always said 3.
++pub fn get_descent<'gc>(
++    _activation: &mut Activation<'_, 'gc>,
++    this: Value<'gc>,
++    _args: &[Value<'gc>],
++) -> Result<Value<'gc>, Error<'gc>> {
++    let this = this.as_object().unwrap();
++
++    let display_object = this.as_display_object().unwrap();
++    let edit_text = display_object.as_edit_text().unwrap();
++
++    Ok(edit_text.flashnx_fte_metrics().1.into())
++}
 diff --git a/core/src/avm2/globals/flash/utils/byte_array.rs b/core/src/avm2/globals/flash/utils/byte_array.rs
 index 23ae3533b..81df1bfb8 100644
 --- a/core/src/avm2/globals/flash/utils/byte_array.rs
@@ -12234,7 +12346,7 @@ index 0926945e0..64f389702 100644
          self.audio_manager
              .stop_sounds_with_handle(self.audio, sound)
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..0e3163618 100644
+index 2e6e01783..b44f2f829 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -12248,9 +12360,12 @@ index 2e6e01783..0e3163618 100644
  mod edit_text;
  mod graphic;
  mod interactive;
-@@ -55,10 +59,15 @@ pub use bitmap::{Bitmap, BitmapClass};
+@@ -53,12 +57,17 @@ pub use avm2_button::Avm2Button;
+ pub use bitmap::{Bitmap, BitmapClass};
+ #[allow(unused)]
  pub use edit_text::LayoutDebugBoxesFlag;
- pub use edit_text::{AutoSizeMode, EditText, TextSelection};
+-pub use edit_text::{AutoSizeMode, EditText, TextSelection};
++pub use edit_text::{set_fte_baseline, AutoSizeMode, EditText, TextSelection};
  pub use graphic::Graphic;
 +pub use graphic::set_lazy_shapes;
  pub use interactive::{Avm2MousePick, InteractiveObject, TInteractiveObject};
@@ -12870,10 +12985,26 @@ index 61b8459b8..88fa7bc9d 100644
              // Find matching children by searching the depth list
              let mut matching_render_children = if case_sensitive {
 diff --git a/core/src/display_object/edit_text.rs b/core/src/display_object/edit_text.rs
-index 23f60ca4d..3e4374c3a 100644
+index 23f60ca4d..ec0aafaa1 100644
 --- a/core/src/display_object/edit_text.rs
 +++ b/core/src/display_object/edit_text.rs
-@@ -246,6 +246,11 @@ impl EditTextData<'_> {
+@@ -50,6 +50,15 @@ use unicode_segmentation::UnicodeSegmentation;
+ 
+ use super::interactive::Avm2MousePick;
+ 
++/// FlashNX (#142): whether an FTE `TextLine` puts its baseline on its origin
++/// (`EditText::flashnx_place_fte_baseline`). Off from FlashNX's
++/// `ftebase.off` marker, to compare.
++static FTE_BASELINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_fte_baseline(enabled: bool) {
++    FTE_BASELINE.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
+ /// The kind of autosizing behavior an `EditText` should have, if any
+ #[derive(Copy, Clone, Collect, Debug, PartialEq, Eq)]
+ #[collect(no_drop)]
+@@ -246,6 +255,11 @@ impl EditTextData<'_> {
  impl<'gc> EditText<'gc> {
      const ANY_NEWLINE: [char; 2] = ['\n', '\r'];
  
@@ -12885,6 +13016,102 @@ index 23f60ca4d..3e4374c3a 100644
      // This seems to be OS-independent
      const INPUT_NEWLINE: char = '\r';
  
+@@ -746,6 +760,55 @@ impl<'gc> EditText<'gc> {
+         self.0.is_fte.set(is_fte);
+     }
+ 
++    /// FlashNX (#142): the first laid-out line's `(ascent, descent)` in
++    /// pixels, what an FTE `TextLine` reports (upstream `39c0179b7` does the
++    /// same on its own `TextLine` object). `(12, 3)`, the old stub, when
++    /// nothing is laid out.
++    pub fn flashnx_fte_metrics(self) -> (f64, f64) {
++        let layout = self.0.layout.borrow();
++        match layout.lines().first() {
++            Some(line) => (line.ascent().to_pixels(), line.descent().to_pixels()),
++            None => (12.0, 3.0),
++        }
++    }
++
++    /// FlashNX (#142): an FTE TextLine whose x and y are its own origin, not
++    /// its bounds' corner (see `x()`).
++    fn flashnx_fte_origin(self) -> bool {
++        self.0.is_fte.get() && FTE_BASELINE.load(std::sync::atomic::Ordering::Relaxed)
++    }
++
++    /// FlashNX (#142): put the first line's BASELINE on the origin, where
++    /// Flash has it on a `TextLine`, the text rising `ascent` above it. A
++    /// text field draws from its top instead, `GUTTER + ascent` above its
++    /// baseline, so every line came out one line too low: the Text Layout
++    /// Framework places lines by their baseline, and Ben 10 Omniverse
++    /// Collection's button labels fell below their buttons, cut off by them.
++    /// Same idea as the unmerged ruffle#25105. Off from `ftebase.off`.
++    pub fn flashnx_place_fte_baseline(self) {
++        if !FTE_BASELINE.load(std::sync::atomic::Ordering::Relaxed) {
++            return;
++        }
++        // `relayout` keeps a copy of the bounds to apply later, autosize or
++        // not, and the next `x`/`y`/render put it back: taken first, or that
++        // copy, from before the shift, undid it.
++        self.apply_autosize_bounds();
++        let ascent = match self.0.layout.borrow().lines().first() {
++            Some(line) => line.ascent(),
++            None => return,
++        };
++        let bounds = self.0.bounds.get();
++        let height = bounds.height();
++        let y_min = -(Self::GUTTER + ascent);
++        self.0.bounds.set(Rectangle {
++            x_min: bounds.x_min,
++            x_max: bounds.x_max,
++            y_min,
++            y_max: y_min + height,
++        });
++        self.invalidate_cached_bitmap();
++    }
++
+     pub fn layout_debug_boxes_flag(self, flag: LayoutDebugBoxesFlag) -> bool {
+         self.0.layout_debug_boxes_flags.get().contains(flag)
+     }
+@@ -2616,26 +2679,37 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
+     }
+ 
+     // The returned position x and y of a text field is offset by the text bounds.
++    //
++    // FlashNX (#142): not an FTE TextLine's. Its x and y are its origin, the
++    // first baseline (`flashnx_place_fte_baseline`); offsetting them by the
++    // bounds put the text back below the baseline the Text Layout Framework
++    // set it on, one line too low.
+     fn x(self) -> Twips {
+         self.apply_autosize_bounds();
++        if self.flashnx_fte_origin() {
++            return self.base().x();
++        }
+         self.base().x() + self.bounds_x_offset()
+     }
+ 
+     fn set_x(self, x: Twips) {
+         self.apply_autosize_bounds();
+-        let offset = self.bounds_x_offset();
++        let offset = if self.flashnx_fte_origin() { Twips::ZERO } else { self.bounds_x_offset() };
+         self.base().set_x(x - offset);
+         self.invalidate_cached_bitmap();
+     }
+ 
+     fn y(self) -> Twips {
+         self.apply_autosize_bounds();
++        if self.flashnx_fte_origin() {
++            return self.base().y();
++        }
+         self.base().y() + self.bounds_y_offset()
+     }
+ 
+     fn set_y(self, y: Twips) {
+         self.apply_autosize_bounds();
+-        let offset = self.bounds_y_offset();
++        let offset = if self.flashnx_fte_origin() { Twips::ZERO } else { self.bounds_y_offset() };
+         self.base().set_y(y - offset);
+         self.invalidate_cached_bitmap();
+     }
 diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
 index 2a73ff9c2..08d6dae01 100644
 --- a/core/src/display_object/graphic.rs
@@ -15340,7 +15567,7 @@ index 91bdb52df..d530d59b1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..91c907173 100644
+index 6e5379213..0ff9ed111 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -15353,7 +15580,7 @@ index 6e5379213..91c907173 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,47 @@ extern crate num_derive;
+@@ -15,10 +18,48 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -15396,12 +15623,13 @@ index 6e5379213..91c907173 100644
 +    take_avm1_unloaded_skipped, take_inner_goto_stats, take_orphan_list_max, set_frame_orphan_queue,
 +};
 +pub use display_object::set_lazy_shapes;
++pub use display_object::set_fte_baseline;
 +pub use drawing::{set_leaf_cull, set_sprite_cull, take_sprite_cull_stats};
 +pub use display_object::{set_full_frame_skip, set_stage_skip, take_enter_skipped, take_subtrees_skipped};
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +66,10 @@ mod ecma_conversions;
+@@ -26,6 +67,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -15412,7 +15640,7 @@ index 6e5379213..91c907173 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +107,18 @@ pub use events::PlayerEvent;
+@@ -63,6 +108,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
