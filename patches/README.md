@@ -106,6 +106,15 @@ collision bitmaps (vector terrain drawn into BitmapData, then point-tested)
 were solid over their whole bounding box: characters stood on air beside the
 drawn ledges (ruffle#19253, fixed upstream on 2026-06-21, after our base).
 
+**`core/common/src/xml.rs` - the entity unescape no longer uses a regex (FlashNX #136, upstream ruffle#21623).**
+
+`E4XNode::parse` unescapes every text node and attribute value with a regex (`&[^;]*;` for AVM2, `&[^;&]*;` for AVM1).</br>
+The pattern is catastrophic on strings with bare `&` and no `;` anywhere: each `&` makes the backtracker walk from itself to the end of the string again, looking for the `;` that never comes.</br>
+Super Mario Bros. Crossover builds its level data exactly that way, MBs of `lakituStart&&HideOnDifficulties=easynormal` with not one `;` in them, and `new XML(...)` spent 34 s on one 4 MB text node inside `XML/init` on a desktop CPU</br>
+(about a minute of a Switch frame, past the script limit the game raises: the preloader stuck at 0 % for good), while Flash Player answers the same call in milliseconds. The unescape is now a linear scan that finds the same candidates the regexes did:</br>
+AVM2 from an `&` to the first `;`, AVM1 only when no other `&` comes first (so `&&amp;` is preserved in one AVM and decoded in the other), verified byte for byte against the regex form on 200 000 fuzz cases and by the `xml_unescaping` tests, which pass unchanged for AS2 and AS3.</br>
+`regress` drops out of `ruffle_common` as a result. Measured headless on the game's own preloader: 192–221 s to the title screen before, 152 s after, the rest is the game's pure-AS3 LZMA decompression, which no native code here can shorten.
+
 **`core/src/avm1/activation.rs`: a removed clip's reference names no clip,
 and SetTarget2 by path.**
 

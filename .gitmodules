@@ -1,3 +1,4 @@
 [submodule "third_party/ruffle"]
 	path = third_party/ruffle
-	url = https://github.com/ruffle-rs/ruffle.git
+	url = https://github.com/doggywatty/ruffle.git
+	branch = main
