@@ -287,6 +287,9 @@ extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
 extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
+// The game's page swapped its movie (lib.rs, `PageNav`; #140, #141):
+// 0 = nothing to do, 1 = the new movie is playing, -1 = it failed.
+extern "C" int  ruffle_page_nav_follow(void);
 // The value rows of the pause and of ECRAN (OVERCLOCK, AFFICHAGE, ROTATION,
 // PIXELS, FILTRE), by panel (UI_KIND_PAUSE / UI_KIND_SCREEN) and row. Input
 // rule 1: A ARMS such a row, and only an armed row takes Left / Right; A
@@ -2008,6 +2011,23 @@ static void worker_entry(void* arg) {
             game_surface_apply();
             // Ruffle's pointer was in the old screen's pixels.
             ruffle_place_mouse((int)cursor_x, (int)cursor_y);
+        }
+        // The game asked its page for another movie during the last frame
+        // (a mission of Alien Unlock, #140/#141): a new player for it, built
+        // here between two frames as Restart builds one.
+        {
+            const int nav = ruffle_page_nav_follow();
+            if (nav < 0) {
+                std::printf("page: the new movie failed to start\n");
+                std::fflush(stdout);
+                back_to_library = true;
+                break;
+            }
+            if (nav > 0) {
+                recenter_cursor();
+                last_tick = ruffle_tick_now();
+                continue;
+            }
         }
         const bool p1_single = (flashnx_pad_update(&pad, PAD_FLAG_PLAYER1) & PAD_READ_SINGLE) != 0;
         // In the pause and its pages, a lone Joy-Con's SL and SR are its

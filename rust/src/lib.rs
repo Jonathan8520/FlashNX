@@ -1176,6 +1176,185 @@ fn fmt_ext_value(v: &ExtValue) -> std::string::String {
 /// the actual container emulation (config, site-lock OK, LSO-backed saves).
 struct ContainerInterface;
 
+/// A movie the hosting page put in place of the one playing (#140, #141).
+///
+/// Some sites are several SWFs that their page swaps in JavaScript. Alien
+/// Unlock and Alien Unlock 2 (Cartoon Network, numuki.com) open on a menu,
+/// `launcher.swf` behind `preloader.swf`; picking a mission calls the page's
+/// `playMission(id)`, whose `loadGame()` REPLACES the embedded movie with the
+/// mission's own SWF, and the mission's end screens call `navigateToMissions()`
+/// to put the menu back. A browser builds a new plugin for each, so FlashNX
+/// builds a new player, as the pause's Restart does, on the movie asked for.
+#[derive(Clone)]
+struct PageNav {
+    swf_url: std::string::String,
+    params: std::vec::Vec<(std::string::String, std::string::String)>,
+}
+
+/// What the page of the game being played says about swapping movies, read
+/// when the game starts on its own movie and kept while the page swaps.
+struct PageCtx {
+    /// URL of the page's directory, with its trailing `/`.
+    base: std::string::String,
+    /// The movie the page embeds first, and the FlashVars it passes it.
+    entry_url: std::string::String,
+    vars: std::vec::Vec<(std::string::String, std::string::String)>,
+    /// `loadGame(missionID)` of the page's script: the SWF of each mission
+    /// it names, and the one for any other.
+    missions: std::vec::Vec<(std::string::String, std::string::String)>,
+    default_mission: Option<std::string::String>,
+}
+
+static PAGE_CTX: Mutex<Option<PageCtx>> = Mutex::new(None);
+/// Asked for by the movie, built at the top of the next frame (C++,
+/// `ruffle_page_nav_follow`): never from inside the call that asked.
+static PAGE_NAV_PENDING: Mutex<Option<PageNav>> = Mutex::new(None);
+/// The movie the current player was built for, when the page swapped it.
+static PAGE_NAV_CURRENT: Mutex<Option<PageNav>> = Mutex::new(None);
+
+/// The string after `key`, `=`, and an opening quote, up to the closing one:
+/// `gameFile = "mission6.swf"` gives `mission6.swf`. None when `key` is
+/// followed by anything else (`gameFile += gameVersion`).
+fn js_assigned_string(text: &str, key: &str) -> Option<(usize, std::string::String)> {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(key) {
+        let at = from + rel + key.len();
+        from = at;
+        let rest = text[at..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim_start();
+        let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+        let body = &rest[1..];
+        let end = body.find(q)?;
+        return Some((at, body[..end].to_string()));
+    }
+    None
+}
+
+/// Read `loadGame()` out of the page's own scripts: which SWF each mission
+/// is, the way Alien Unlock's `switch (missionID)` says (`mission06` is
+/// `mission6.swf`, any other `mission.swf`), or Alien Unlock 2's single
+/// `gameFile = "missions.swf"`. Only a page whose script also has
+/// `navigateToMissions()` is this kind of site.
+fn page_ctx_for(html: &[u8], base: &str, sidecar_dir: &std::path::Path, entry_url: &str) -> Option<PageCtx> {
+    let page = std::string::String::from_utf8_lossy(html);
+    let host_path = base.strip_prefix("http://").or_else(|| base.strip_prefix("https://"))?;
+    // The page's local scripts: `src="js/content.js?v2"`.
+    let mut from = 0;
+    while let Some(rel) = page[from..].find("src=") {
+        let at = from + rel + 4;
+        from = at;
+        let rest = &page[at..];
+        let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+        let Some(end) = rest[1..].find(q) else { continue };
+        let src = &rest[1..1 + end];
+        let src = src.split(['?', '#']).next().unwrap_or(src);
+        if src.contains("://") || src.starts_with('/') || !src.to_ascii_lowercase().ends_with(".js") {
+            continue;
+        }
+        let mut path = sidecar_dir.to_path_buf();
+        for s in host_path.split('/').chain(src.split('/')).filter(|s| !s.is_empty() && *s != "." && *s != "..") {
+            path.push(s);
+        }
+        let Some(js) = crate::sources::gamezip::read_file_bounded(&path.to_string_lossy(), 256 * 1024) else {
+            continue;
+        };
+        let js = std::string::String::from_utf8_lossy(&js).into_owned();
+        let (Some(start), true) = (js.find("function loadGame("), js.contains("function navigateToMissions(")) else {
+            continue;
+        };
+        // The function's body: up to the next top-level function, without its
+        // commented-out lines (`// gameFile = "gameharness.swf"`).
+        let tail = &js[start..];
+        let end = tail[1..].find("\nfunction ").map(|e| e + 1).unwrap_or(tail.len());
+        let body: std::string::String = tail[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<std::vec::Vec<_>>()
+            .join("\n");
+        let mut missions = std::vec::Vec::new();
+        let mut cursor = 0;
+        while let Some(rel) = body[cursor..].find("case ") {
+            let at = cursor + rel + 5;
+            cursor = at;
+            let rest = body[at..].trim_start();
+            let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+            let Some(end) = rest[1..].find(q) else { continue };
+            let id = rest[1..1 + end].to_string();
+            if let Some((_, file)) = js_assigned_string(&body[at..], "gameFile") {
+                missions.push((id, file));
+            }
+        }
+        let default_mission = match body.find("default:") {
+            Some(d) => js_assigned_string(&body[d..], "gameFile").map(|(_, f)| f),
+            None if missions.is_empty() => js_assigned_string(&body, "gameFile").map(|(_, f)| f),
+            None => None,
+        };
+        log_str(&std::format!(
+            "page: {} swaps its movie: missions {:?}, other {:?}\n",
+            src, missions, default_mission
+        ));
+        return Some(PageCtx {
+            base: base.to_string(),
+            entry_url: entry_url.to_string(),
+            vars: crate::sources::gamezip::flashvars_from_html(html),
+            missions,
+            default_mission,
+        });
+    }
+    None
+}
+
+/// The page's answer to `playMission(id)` and `navigateToMissions()`, queued
+/// for the next frame. False when the game's page does not swap movies.
+fn page_nav_request(lname: &str, args: &[ExtValue]) -> bool {
+    let Ok(ctx) = PAGE_CTX.lock() else { return false };
+    let Some(ctx) = ctx.as_ref() else { return false };
+    let var = |k: &str| ctx.vars.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
+    let nav = if lname == "playmission" {
+        let Some(ExtValue::String(id)) = args.first() else { return false };
+        let file = ctx
+            .missions
+            .iter()
+            .find(|(m, _)| m == id)
+            .map(|(_, f)| f.clone())
+            .or_else(|| ctx.default_mission.clone());
+        let Some(file) = file else { return false };
+        // `loadGame()`'s FlashVars: the page's locale and the mission.
+        let locale = var("string_locale").or_else(|| var("locale")).unwrap_or_default();
+        PageNav {
+            swf_url: std::format!("{}{}", ctx.base, file),
+            params: std::vec![
+                (std::string::String::from("locale"), locale),
+                (std::string::String::from("missionID"), id.clone()),
+            ],
+        }
+    } else {
+        // `loadContent("MISSIONSELECT", "false")`: the page's own movie and
+        // FlashVars, opened on the mission select.
+        let params = ctx
+            .vars
+            .iter()
+            .map(|(k, v)| {
+                let v = if k.eq_ignore_ascii_case("string_startSection") {
+                    std::string::String::from("MISSIONSELECT")
+                } else if k.eq_ignore_ascii_case("string_initialLoad") {
+                    std::string::String::from("false")
+                } else {
+                    v.clone()
+                };
+                (k.clone(), v)
+            })
+            .collect();
+        PageNav { swf_url: ctx.entry_url.clone(), params }
+    };
+    log_str(&std::format!("page: next movie {} {:?}\n", nav.swf_url, nav.params));
+    if let Ok(mut p) = PAGE_NAV_PENDING.lock() {
+        *p = Some(nav);
+    }
+    true
+}
+
 /// Callbacks the movie has registered for its container to call, lowercased.
 static EI_CALLBACKS: Mutex<std::vec::Vec<std::string::String>> = Mutex::new(std::vec::Vec::new());
 /// Container callbacks waiting to be made on the next frame, with the argument
@@ -1213,6 +1392,11 @@ impl ExternalInterfaceProvider for ContainerInterface {
         // query (the Disney message bus / site-lock) is always a short method name,
         // never a `<script>` blob — so bail to Null the moment the "name" is JS code.
         if lname.contains("<script") || name.contains('\n') {
+            return ExtValue::Null;
+        }
+        // The page swaps the movie (see `PageNav`): a mission, or back to the
+        // mission select. Nothing to answer, the page's functions return none.
+        if (lname == "playmission" || lname == "navigatetomissions") && page_nav_request(&lname, args) {
             return ExtValue::Null;
         }
         // Disney minigame message bus: `disneyGamesSendMessage(<type>, …)`, where
@@ -1599,7 +1783,50 @@ pub extern "C" fn ruffle_init() -> c_int {
 
     // HTML-wrapped game? Its container page carries both the FlashVars (below)
     // and the base every relative load must resolve against (the navigator).
+    // The page swapped its movie (#140, #141, see `PageNav`): this player is
+    // built for the one it asked for, read from the game's own tree. The game
+    // stays the same game: its saves, keys and settings follow the file the
+    // player picked, not the movie.
+    let nav = PAGE_NAV_CURRENT.lock().ok().and_then(|g| g.clone());
+    let (movie_bytes, source_label) = match nav.as_ref() {
+        Some(n) if n.swf_url != source_label => {
+            let rest = n
+                .swf_url
+                .split_once("://")
+                .map(|(_, r)| r)
+                .unwrap_or(&n.swf_url)
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("");
+            let mut path = sidecar_dir.clone();
+            for s in rest.split('/').filter(|s| !s.is_empty() && *s != "." && *s != "..") {
+                path.push(s);
+            }
+            match crate::sources::gamezip::read_file_bounded(&path.to_string_lossy(), 256 * 1024 * 1024) {
+                Some(b) => {
+                    log_str(&std::format!("ruffle_init: page movie {} ({} bytes)\n", path.display(), b.len()));
+                    (b, n.swf_url.clone())
+                }
+                None => {
+                    log_str(&std::format!("ruffle_init: page movie {} missing, playing the game's own\n", path.display()));
+                    (movie_bytes, source_label)
+                }
+            }
+        }
+        _ => (movie_bytes, source_label),
+    };
+
     let container = container_html_for(&sidecar_dir, &source_label);
+    // Read what the page does when the game starts on its own movie, and keep
+    // it while the page swaps others in.
+    if nav.is_none() {
+        let ctx = container
+            .as_ref()
+            .and_then(|(html, base)| page_ctx_for(html, base, &sidecar_dir, &source_label));
+        if let Ok(mut g) = PAGE_CTX.lock() {
+            *g = ctx;
+        }
+    }
 
     // A Club Penguin minigame that saved through the Club Penguin client:
     // given one, and its save switched back on (#134, Puffle Launch). Any
@@ -1657,6 +1884,11 @@ pub extern "C" fn ruffle_init() -> c_int {
                 ];
                 log_str(&std::format!("ruffle_init: injected Disney FlashVars: {:?}\n", params));
                 movie.append_parameters(params);
+            } else if let Some(n) = nav.as_ref() {
+                // A movie the page swapped in gets the FlashVars the page gave
+                // it, not the ones of the page's first movie.
+                log_str(&std::format!("ruffle_init: page FlashVars: {:?}\n", n.params));
+                movie.append_parameters(n.params.clone());
             } else if let Some((html, _)) = container.as_ref() {
                 // Generic HTML-wrapped game: the container page carries the
                 // FlashVars literally, so read them off it instead of hardcoding
@@ -2074,16 +2306,40 @@ fn container_html_for(
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
         .collect();
-    segs.pop()?; // drop the SWF filename -> its directory
+    let swf_name = segs.pop()?.to_ascii_lowercase(); // -> the SWF's directory
     // Walk up from the SWF's directory looking for the container page.
     for _ in 0..4 {
-        let mut cand = sidecar_dir.to_path_buf();
+        let mut dir = sidecar_dir.to_path_buf();
         for s in &segs {
-            cand.push(s);
+            dir.push(s);
         }
-        cand.push("index.html");
-        let bytes =
+        let mut cand = dir.join("index.html");
+        let mut bytes =
             crate::sources::gamezip::read_file_bounded(&cand.to_string_lossy(), 256 * 1024);
+        // Not every page is an `index.html`: Flashpoint launches many games
+        // through a page named after them (Alien Unlock 2's
+        // `alien-unlock-2.html`, #140/#141), and that page carries the
+        // FlashVars just the same. Take the page of this directory that embeds
+        // the movie by name; another page beside it may embed something else.
+        if bytes.is_none() {
+            for name in crate::library::list_files_top(&dir.to_string_lossy()) {
+                let lower = name.to_ascii_lowercase();
+                if !(lower.ends_with(".html") || lower.ends_with(".htm")) {
+                    continue;
+                }
+                let path = dir.join(&name);
+                let Some(b) =
+                    crate::sources::gamezip::read_file_bounded(&path.to_string_lossy(), 256 * 1024)
+                else {
+                    continue;
+                };
+                if std::string::String::from_utf8_lossy(&b).to_ascii_lowercase().contains(&swf_name) {
+                    cand = path;
+                    bytes = Some(b);
+                    break;
+                }
+            }
+        }
         if let Some(b) = bytes {
             let base = std::format!("http://{}/", segs.join("/"));
             log_str(&std::format!(
@@ -3905,6 +4161,34 @@ static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// success, non-zero on init failure.
 #[no_mangle]
 pub extern "C" fn ruffle_restart() -> c_int {
+    // Restart is the page reloaded: the game's own first movie again, not the
+    // one its page last swapped in (#140, #141).
+    if let Ok(mut g) = PAGE_NAV_CURRENT.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = PAGE_NAV_PENDING.lock() {
+        *g = None;
+    }
+    rebuild_player()
+}
+
+/// The page asked for another movie during the last frame (see `PageNav`):
+/// build the player for it, as Restart builds one. Called by the C++ loop at
+/// the top of each frame. 0 = nothing asked, 1 = the new movie is playing,
+/// -1 = the new player could not be built.
+#[no_mangle]
+pub extern "C" fn ruffle_page_nav_follow() -> c_int {
+    let Some(nav) = PAGE_NAV_PENDING.lock().ok().and_then(|mut g| g.take()) else {
+        return 0;
+    };
+    log_str(&std::format!("page: swapping in {}\n", nav.swf_url));
+    if let Ok(mut g) = PAGE_NAV_CURRENT.lock() {
+        *g = Some(nav);
+    }
+    if rebuild_player() == 0 { 1 } else { -1 }
+}
+
+fn rebuild_player() -> c_int {
     log(b"ruffle_restart: tearing down current Player\n\0");
     unsafe {
         STATE = None;
@@ -4544,6 +4828,16 @@ pub extern "C" fn ruffle_library_reset() {
         *g = None;
     }
     if let Ok(mut g) = OVERRIDE_SWF_PATH.lock() {
+        *g = None;
+    }
+    // The page of the game left (#140, #141) has nothing to say to the next.
+    if let Ok(mut g) = PAGE_CTX.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = PAGE_NAV_CURRENT.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = PAGE_NAV_PENDING.lock() {
         *g = None;
     }
     // Last: the emptiest the process ever gets between two games. `ruffle_

@@ -5743,7 +5743,7 @@ extern "C" {
 /// enumerating every file inside every `<game>.files/` companion tree to obtain
 /// the four hundred names at the top — several seconds of frozen screen before
 /// a move could even start, growing with the library rather than with the job.
-fn list_files_top(dir: &str) -> std::vec::Vec<std::string::String> {
+pub(crate) fn list_files_top(dir: &str) -> std::vec::Vec<std::string::String> {
     let mut buf = std::vec![0u8; 256 * 1024];
     let c = std::format!("{}\0", dir);
     let n = unsafe {
