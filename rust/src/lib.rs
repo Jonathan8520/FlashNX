@@ -1429,10 +1429,12 @@ pub extern "C" fn ruffle_init() -> c_int {
         // still using a third of the screen, which is the very problem #78 is
         // about. The framebuffer stays landscape; the renderer maps one onto the
         // other.
+        //
+        // In screen pixels, denser on a TV (#144): see `ruffle_viewport`.
         .with_viewport_dimensions(
-            if crate::backend::render::rotation_swaps_axes() { VIEWPORT_H } else { VIEWPORT_W },
-            if crate::backend::render::rotation_swaps_axes() { VIEWPORT_W } else { VIEWPORT_H },
-            1.0,
+            ruffle_viewport().width,
+            ruffle_viewport().height,
+            ruffle_viewport().scale_factor,
         )
         // Stage scaling, chosen by the user in REGLAGES > AFFICHAGE (issues
         // #65, #69, #74: three players in three languages asking to lose the
@@ -3726,17 +3728,49 @@ pub(crate) fn rotation_live(q: u8, pan: (i32, i32)) {
         }
     };
     if let Ok(mut player) = state.player.lock() {
-        let swap = crate::backend::render::rotation_swaps_axes();
-        let (w, h) = if swap {
-            (VIEWPORT_H, VIEWPORT_W)
-        } else {
-            (VIEWPORT_W, VIEWPORT_H)
-        };
-        player.set_viewport_dimensions(ruffle_render::backend::ViewportDimensions {
-            width: w,
-            height: h,
-            scale_factor: 1.0,
-        });
+        player.set_viewport_dimensions(ruffle_viewport());
+    }
+}
+
+/// The viewport Ruffle composes the game for: the logical one (portrait while
+/// the picture is turned) in screen pixels, with the density that maps one
+/// onto the other as `scale_factor`.
+///
+/// On a TV the game is drawn at 1920x1080 (#144): 1.5 screen pixels to the
+/// logical one, the way a HiDPI browser hands Ruffle its window. Ruffle then
+/// fits the stage to the bigger picture, while a `noScale` stage and
+/// `Capabilities.screenResolutionX` divide the density back out: a game lays
+/// itself out exactly as in handheld and only gains the pixels.
+fn ruffle_viewport() -> ruffle_render::backend::ViewportDimensions {
+    let s = crate::backend::render::render_scale();
+    let (w, h) = if crate::backend::render::rotation_swaps_axes() {
+        (VIEWPORT_H, VIEWPORT_W)
+    } else {
+        (VIEWPORT_W, VIEWPORT_H)
+    };
+    ruffle_render::backend::ViewportDimensions {
+        width: (w as f32 * s).round() as u32,
+        height: (h as f32 * s).round() as u32,
+        scale_factor: s as f64,
+    }
+}
+
+/// The C++ loop drew the window surface at a new size (#144): `percent` is
+/// screen pixels per logical pixel, 150 for 1920x1080 on a TV, 100 for
+/// 1280x720. Called before a game's player is built, and again whenever the
+/// console is docked or taken out of the dock during the game, in which case
+/// the running player is laid out for the new screen at once.
+#[no_mangle]
+pub extern "C" fn ruffle_set_render_scale(percent: c_int) {
+    crate::backend::render::set_render_scale_percent(percent.clamp(100, 300) as u16);
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut player) = state.player.lock() {
+        player.set_viewport_dimensions(ruffle_viewport());
     }
 }
 
@@ -4908,14 +4942,17 @@ fn move_cursor(x: c_int, y: c_int, used: bool) {
     let (gx, gy) = unrotate(sx, sy);
     state.cursor_stage_x = gx;
     state.cursor_stage_y = gy;
+    // Ruffle's viewport is in screen pixels, denser than the logical ones on
+    // a TV (#144).
+    let k = crate::backend::render::render_scale() as f64;
     if let Ok(mut p) = state.player.lock() {
         // The pointer is used: it is on the stage (see `ruffle_init`).
         if used {
             note_pointer_use(&mut p);
         }
         p.handle_event(PlayerEvent::MouseMove {
-            x: gx as f64,
-            y: gy as f64,
+            x: gx as f64 * k,
+            y: gy as f64 * k,
         });
     }
 }
@@ -4930,9 +4967,11 @@ fn handle_mouse_button_impl(button: MouseButton, down: bool) {
         }
     };
     state.cursor_clicked = down;
-    // The STAGE point, not the screen one: see `cursor_stage_x`.
-    let x = state.cursor_stage_x as f64;
-    let y = state.cursor_stage_y as f64;
+    // The STAGE point, not the screen one: see `cursor_stage_x`. In Ruffle's
+    // screen pixels, as `move_cursor` sends it (#144).
+    let k = crate::backend::render::render_scale() as f64;
+    let x = state.cursor_stage_x as f64 * k;
+    let y = state.cursor_stage_y as f64 * k;
     if let Ok(mut p) = state.player.lock() {
         let event = if down {
             PlayerEvent::MouseDown {

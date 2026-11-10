@@ -1047,6 +1047,27 @@ pub fn rotation_swaps_axes() -> bool {
     matches!(game_rotation(), 1 | 3)
 }
 
+/// Screen pixels per pixel of the logical viewport, in percent (issue #144):
+/// 150 while a game is drawn at 1920x1080 for a TV, 100 otherwise. Set by the
+/// C++ loop, which owns the window surface (`ruffle_set_render_scale`).
+///
+/// Only the GAME is drawn at the TV's size. Ruffle is told the screen is that
+/// much denser, the way a HiDPI browser tells it, so a game lays itself out
+/// exactly as in handheld (a `noScale` stage and `Capabilities` still read
+/// 1280x720) and only its picture gains the pixels. Everything else keeps the
+/// logical 1280x720: the pointer, the touch screen, the zoom's framing and
+/// every panel drawn over the game, which `world_matrix` simply stretches over
+/// the bigger surface, as the TV used to.
+static RENDER_SCALE_PCT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(100);
+
+pub fn set_render_scale_percent(pct: u16) {
+    RENDER_SCALE_PCT.store(pct.clamp(100, 300), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn render_scale() -> f32 {
+    RENDER_SCALE_PCT.load(core::sync::atomic::Ordering::Relaxed) as f32 / 100.0
+}
+
 /// One chip of the shelf strip under the Play tab's tabs.
 pub struct HomeChip {
     pub kind: HomeChipKind,
@@ -3378,7 +3399,13 @@ impl GlStateCache {
 }
 
 pub struct SwitchRenderBackend {
+    /// The LOGICAL viewport every panel, toast and pointer is laid out in:
+    /// 1280x720 (portrait while the picture is turned), whatever the surface.
     dimensions: ViewportDimensions,
+    /// What Ruffle composes the game for, in screen pixels: `dimensions` times
+    /// `render_scale()`, 1920x1080 on a TV (#144), and the same as
+    /// `dimensions` everywhere else. The game layer and its blends use it.
+    game_dims: ViewportDimensions,
     tessellator: ShapeTessellator,
 
     solid: SolidProgram,
@@ -7784,6 +7811,13 @@ impl SwitchRenderBackend {
                 height,
                 scale_factor: 1.0,
             },
+            // Until Ruffle sets its viewport (`PlayerBuilder::build` does, with
+            // the TV's density): the library renderer never gets another.
+            game_dims: ViewportDimensions {
+                width,
+                height,
+                scale_factor: 1.0,
+            },
             tessellator: ShapeTessellator::new(),
             solid,
             bitmap_prog,
@@ -7938,8 +7972,16 @@ impl SwitchRenderBackend {
     }
 
     fn world_matrix(&self, m: &Matrix) -> [GLfloat; 9] {
+        // The screen is the game's own size for the game, which Ruffle composed
+        // in screen pixels, and the logical one for everything drawn over it
+        // (#144). Both divide out to the same whole screen.
         let (w, h, flip_y) = match self.offscreen_dims {
             Some((ow, oh)) => (ow.max(1) as f32, oh.max(1) as f32, false),
+            None if self.game_layer => (
+                self.game_dims.width.max(1) as f32,
+                self.game_dims.height.max(1) as f32,
+                true,
+            ),
             None => (
                 self.dimensions.width.max(1) as f32,
                 self.dimensions.height.max(1) as f32,
@@ -7979,14 +8021,17 @@ impl SwitchRenderBackend {
         let zp = game_zoom_percent();
         let (a, b, c, d, tx, ty) = if flip_y && self.game_layer && zp != 100 {
             let z = zp as f32 / 100.0;
+            // The framing is kept in logical pixels; this layer is in the
+            // game's (#144).
             let (ox, oy) = game_pan();
+            let k = self.surface_scale();
             (
                 a * z,
                 b * z,
                 c * z,
                 d * z,
-                tx * z + pw * 0.5 * (1.0 - z) + ox as f32,
-                ty * z + ph * 0.5 * (1.0 - z) + oy as f32,
+                tx * z + pw * 0.5 * (1.0 - z) + ox as f32 * k,
+                ty * z + ph * 0.5 * (1.0 - z) + oy as f32 * k,
             )
         } else {
             (a, b, c, d, tx, ty)
@@ -9350,7 +9395,8 @@ impl SwitchRenderBackend {
     fn current_target_dims(&self) -> (u32, u32) {
         match self.offscreen_dims {
             Some((w, h)) => (w, h),
-            None => (self.dimensions.width, self.dimensions.height),
+            // Only the game's blends ask, and the game is drawn at its own size.
+            None => (self.game_dims.width, self.game_dims.height),
         }
     }
 
@@ -9510,11 +9556,13 @@ impl SwitchRenderBackend {
         // only target the zoom exists on.
         let (cz, cpx, cpy) = if flip != 0.0 && self.game_layer && game_zoom_percent() != 100 {
             let z = game_zoom_percent() as f32 / 100.0;
+            // Logical framing, over a target in the game's pixels (#144).
             let (ox, oy) = game_pan();
+            let k = self.surface_scale();
             (
                 z,
-                ox as f32 / w.max(1) as f32,
-                oy as f32 / h.max(1) as f32,
+                ox as f32 * k / w.max(1) as f32,
+                oy as f32 * k / h.max(1) as f32,
             )
         } else {
             (1.0, 0.0, 0.0)
@@ -12529,17 +12577,26 @@ impl SwitchRenderBackend {
     /// for screens with no transition).
     /// Size of the real framebuffer, which never turns.
     ///
-    /// `self.dimensions` is the LOGICAL viewport Ruffle composes for, and it is
-    /// portrait while the picture is turned a quarter. Every glViewport that
-    /// targets the screen wants THIS instead: setting the logical one squeezed
-    /// the whole frame into the left 720 columns and left the previous, unturned
-    /// frame showing in the rest.
+    /// `self.game_dims` is the viewport Ruffle composes for, and it is portrait
+    /// while the picture is turned a quarter. Every glViewport that targets the
+    /// screen wants THIS instead: setting the logical one squeezed the whole
+    /// frame into the left 720 columns and left the previous, unturned frame
+    /// showing in the rest. It is also the surface's size on a TV (#144), where
+    /// the game is drawn at 1920x1080.
     fn physical_dims(&self) -> (u32, u32) {
         if rotation_swaps_axes() {
-            (self.dimensions.height, self.dimensions.width)
+            (self.game_dims.height, self.game_dims.width)
         } else {
-            (self.dimensions.width, self.dimensions.height)
+            (self.game_dims.width, self.game_dims.height)
         }
+    }
+
+    /// Screen pixels per logical pixel: 1.5 while the game is drawn at
+    /// 1920x1080 for a TV, 1 otherwise (#144). From the two sizes in force,
+    /// not from `render_scale()`, so a frame never mixes an old size with a
+    /// new scale while the console is being docked.
+    fn surface_scale(&self) -> f32 {
+        self.game_dims.width as f32 / self.dimensions.width.max(1) as f32
     }
 
     pub fn clear_ui_transform(&mut self) {
@@ -12610,6 +12667,9 @@ impl SwitchRenderBackend {
     fn scissor_screen(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let (pw, ph) = self.physical_dims();
         let (pw, ph) = (pw as f32, ph as f32);
+        // Logical pixels -> screen pixels: a panel clipped on a TV (#144).
+        let k = self.surface_scale();
+        let (x0, y0, x1, y1) = (x0 * k, y0 * k, x1 * k, y1 * k);
         // Logical rect corners -> physical, top-left origin. Same mapping as the
         // translation half of `world_matrix`.
         let (px0, py0, px1, py1) = match game_rotation() {
@@ -15254,14 +15314,30 @@ fn approx_sin(x: f32) -> f32 {
 
 impl RenderBackend for SwitchRenderBackend {
     fn viewport_dimensions(&self) -> ViewportDimensions {
-        self.dimensions
+        // Ruffle's own, density included: `Capabilities.screenResolutionX` and
+        // a `noScale` stage divide it back out to the logical size (#144).
+        self.game_dims
     }
 
     fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
         // `dimensions` is what RUFFLE composes for, and it is portrait while the
         // picture is turned. The framebuffer never turns, so glViewport gets the
         // physical rectangle and the matrix hook maps one onto the other.
-        self.dimensions = dimensions;
+        //
+        // It is in screen pixels, `scale_factor` times the logical viewport the
+        // panels are laid out in: 1.5 on a TV, where the game is drawn at
+        // 1920x1080 (#144), 1 everywhere else.
+        self.game_dims = dimensions;
+        let sf = if dimensions.scale_factor.is_finite() && dimensions.scale_factor > 0.0 {
+            dimensions.scale_factor
+        } else {
+            1.0
+        };
+        self.dimensions = ViewportDimensions {
+            width: (dimensions.width as f64 / sf).round() as u32,
+            height: (dimensions.height as f64 / sf).round() as u32,
+            scale_factor: 1.0,
+        };
         let (pw, ph) = if rotation_swaps_axes() {
             (dimensions.height, dimensions.width)
         } else {
@@ -16413,7 +16489,7 @@ impl RenderBackend for SwitchRenderBackend {
                 }
             };
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} dlMB={}/{}({}) drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} res={}x{} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} dlMB={}/{}({}) drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -16423,6 +16499,8 @@ impl RenderBackend for SwitchRenderBackend {
                 batt_mc,
                 batt_pm,
                 docked,
+                self.physical_dims().0,
+                self.physical_dims().1,
                 tick_ms,
                 render_ms,
                 draw_calls,

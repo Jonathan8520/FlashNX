@@ -100,6 +100,18 @@ extern "C" void gl_context_swap_immediate(void) {
     eglSwapInterval(s_display, 1);
 }
 
+/// The window surface's size as it stands, in pixels: 1280x720, or 1920x1080
+/// while a game is drawn for a TV (#144).
+extern "C" void gl_context_dims(unsigned int* w, unsigned int* h) {
+    u32 ww = 0, hh = 0;
+    if (!s_win || R_FAILED(nwindowGetDimensions(s_win, &ww, &hh))) {
+        ww = 1280;
+        hh = 720;
+    }
+    *w = ww;
+    *h = hh;
+}
+
 /// Change the INTERNAL render resolution by recreating just the window surface.
 ///
 /// The display scaler upscales whatever the surface is to the panel, so a smaller
@@ -136,6 +148,12 @@ extern "C" bool gl_context_resize(unsigned int w, unsigned int h) {
         std::printf("gl_context_resize: eglMakeCurrent failed 0x%x\n", eglGetError());
         return false;
     }
+    // GL sets the viewport to the surface only the FIRST time a context is
+    // made current; afterwards it keeps whatever was last asked. The library
+    // never sets one, so back from a game drawn at 1920x1080 on a TV (#144)
+    // it drew through that one onto the 1280x720 surface: 1.5x too big, its
+    // lower left corner filling the screen.
+    glViewport(0, 0, (GLsizei)w, (GLsizei)h);
     std::printf("gl_context_resize: internal resolution now %ux%u\n", w, h);
     std::fflush(stdout);
     return true;

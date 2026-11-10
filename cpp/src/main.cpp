@@ -226,6 +226,8 @@ extern "C" void ruffle_library_bank_playtime(void);
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_place_mouse(int x, int y);
+// Screen pixels per logical pixel, in percent (lib.rs, #144).
+extern "C" void ruffle_set_render_scale(int percent);
 extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
@@ -855,6 +857,47 @@ static constexpr float GAME_TOUCH_SCALE_Y = (float)GAME_VIEWPORT_H / (float)PANE
 
 // Recreate the window surface at a different size, preserving all GL objects.
 extern "C" bool gl_context_resize(unsigned int w, unsigned int h);
+extern "C" void gl_context_dims(unsigned int* w, unsigned int* h);
+
+// A game on a TV is drawn at the TV's resolution (#144). Docked, the console
+// sends the TV a 1080p picture, and a game drawn at 1280x720 was scaled up to
+// it: shapes, lines and text as soft as any 720p image stretched to 1080p.
+// The surface is 1920x1080 now while the console is docked and its output is
+// 1080p (System Settings > TV output, which appletGetDefaultDisplayResolution
+// reports); in handheld, or on a TV set to 720p, it stays at 1280x720, where
+// extra pixels would only be scaled back down.
+//
+// Only the surface and the game's own picture change. GAME_VIEWPORT_* stays
+// the logical space the pointer, the touch screen, the zoom and the panels
+// over the game speak, and Ruffle is told the screen is denser (lib.rs,
+// `ruffle_set_render_scale`). `tv1080.off` on the card keeps 1280x720.
+static bool g_tv1080_off = false;
+
+static bool game_wants_1080(void) {
+    if (g_tv1080_off || appletGetOperationMode() != AppletOperationMode_Console) {
+        return false;
+    }
+    s32 w = 0, h = 0;
+    return R_SUCCEEDED(appletGetDefaultDisplayResolution(&w, &h)) && w >= 1920 && h >= 1080;
+}
+
+// Size the surface for the game as the console stands now, and tell the
+// player. No-op when it is already right. Failing to make the big surface
+// falls back to the panel's size: a soft picture, never a black one.
+static void game_surface_apply(void) {
+    const bool hd = game_wants_1080();
+    const unsigned want_w = hd ? 1920u : (unsigned)GAME_VIEWPORT_W;
+    const unsigned want_h = hd ? 1080u : (unsigned)GAME_VIEWPORT_H;
+    unsigned cur_w = 0, cur_h = 0;
+    gl_context_dims(&cur_w, &cur_h);
+    if (cur_w != want_w || cur_h != want_h) {
+        if (!gl_context_resize(want_w, want_h) && hd) {
+            gl_context_resize(GAME_VIEWPORT_W, GAME_VIEWPORT_H);
+        }
+        gl_context_dims(&cur_w, &cur_h);
+    }
+    ruffle_set_render_scale((int)(cur_w * 100u / (unsigned)GAME_VIEWPORT_W));
+}
 
 // Right-stick axis range (libnx reports -0x7FFF..0x7FFF).
 static constexpr float STICK_DEADZONE = 4000.0f;
@@ -1773,9 +1816,12 @@ static void worker_entry(void* arg) {
     // the new renderer picks up the game viewport, and the UI never rendered at
     // this size. Covers the forwarder path too, which joins us just above. On
     // failure we simply keep the current surface, so a game runs at panel size.
-    if (GAME_VIEWPORT_W != UI_VIEWPORT_W || GAME_VIEWPORT_H != UI_VIEWPORT_H) {
-        gl_context_resize(GAME_VIEWPORT_W, GAME_VIEWPORT_H);
+    // On a TV that is 1920x1080 (#144); the marker is read once per game.
+    {
+        struct stat st;
+        g_tv1080_off = ::stat("sdmc:/switch/FlashNX/tv1080.off", &st) == 0;
     }
+    game_surface_apply();
 
     if (ruffle_init() != 0) {
         std::printf("ruffle_init failed — exiting .nro\n");
@@ -1946,8 +1992,23 @@ static void worker_entry(void* arg) {
         else if (key != SK_NONE)        ruffle_handle_key(key, down);
     };
 
+    // Docking or undocking during the game resizes it on the next frame
+    // (#144). The mode is cached by libnx, so reading it every frame costs
+    // nothing; the TV's resolution comes a moment after the dock does, and
+    // its change event catches that second step.
+    AppletOperationMode tv_mode = appletGetOperationMode();
+    Event tv_res_event;
+    const bool tv_res_event_ok = R_SUCCEEDED(appletGetDefaultDisplayResolutionChangeEvent(&tv_res_event));
+
     minus_watch_start();
     while (flashnx_main_loop()) {
+        if (appletGetOperationMode() != tv_mode
+            || (tv_res_event_ok && R_SUCCEEDED(eventWait(&tv_res_event, 0)))) {
+            tv_mode = appletGetOperationMode();
+            game_surface_apply();
+            // Ruffle's pointer was in the old screen's pixels.
+            ruffle_place_mouse((int)cursor_x, (int)cursor_y);
+        }
         const bool p1_single = (flashnx_pad_update(&pad, PAD_FLAG_PLAYER1) & PAD_READ_SINGLE) != 0;
         // In the pause and its pages, a lone Joy-Con's SL and SR are its
         // shoulders, L and R, which the menus page with (the editor's layers,
@@ -3174,6 +3235,9 @@ static void worker_entry(void* arg) {
         if (back_to_library) break;
     }
     minus_watch_stop();
+    if (tv_res_event_ok) {
+        eventClose(&tv_res_event);
+    }
 
     // End of game loop. Either:
     //   - back_to_library == true: user picked QUITTER → tear down Ruffle,
@@ -3197,10 +3261,16 @@ static void worker_entry(void* arg) {
         std::fflush(stdout);
         // Back to panel resolution so the library UI is sharp again. After
         // ruffle_shutdown (game renderer gone) and before library_init rebuilds
-        // the UI renderer at UI_VIEWPORT_*.
-        if (GAME_VIEWPORT_W != UI_VIEWPORT_W || GAME_VIEWPORT_H != UI_VIEWPORT_H) {
-            gl_context_resize(UI_VIEWPORT_W, UI_VIEWPORT_H);
+        // the UI renderer at UI_VIEWPORT_*. A game on a TV leaves the surface
+        // at 1920x1080 (#144), where the library would fill only a corner.
+        {
+            unsigned cur_w = 0, cur_h = 0;
+            gl_context_dims(&cur_w, &cur_h);
+            if (cur_w != (unsigned)UI_VIEWPORT_W || cur_h != (unsigned)UI_VIEWPORT_H) {
+                gl_context_resize(UI_VIEWPORT_W, UI_VIEWPORT_H);
+            }
         }
+        ruffle_set_render_scale(100);
         ruffle_library_reset();
     } else {
         // Forwarder launch (or home/close button): there's no library to return
