@@ -2191,6 +2191,17 @@ static BLEND_PX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 static BLEND_PX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BLEND_PX_FULL_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BLEND_PX_FULL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// The same for blends INSIDE a BitmapData.draw or a cached render (#140,
+// #141): how many ran there, how many of those were held to their box, and
+// the share of their target's pixels they went over.
+static BLEND_NEST_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_N_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_RECT_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_RECT_N_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_PX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_PX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_PX_FULL_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_NEST_PX_FULL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Render-target rebinds this frame (2026-08-24). A glow chain costs 6 of these
 /// to draw 5 half-res quads, and the measured 105 ms at 23 chains works out to
@@ -3570,6 +3581,9 @@ pub struct SwitchRenderBackend {
     /// Blends hold their copy, clear and composite to the box their group
     /// covers (`blend_region`). `blendrect.off` turns that off, to compare.
     blend_rect_on: bool,
+    /// The same inside a BitmapData.draw or a cached render (#140, #141).
+    /// `blendnest.off` turns that off alone, to compare.
+    blend_nest_on: bool,
     /// Shapes are tessellated at the scale they are drawn at, so strokes keep
     /// at least one screen pixel (#137). `strokescale.off` tessellates every
     /// shape at 1, as before, to compare.
@@ -7653,6 +7667,9 @@ impl SwitchRenderBackend {
         if marker_present("blendrect.off") {
             log(b"blend: blendrect.off present -> blends copy and composite the whole screen\n\0");
         }
+        if marker_present("blendnest.off") {
+            log(b"blend: blendnest.off present -> blends inside a draw() go over the whole bitmap\n\0");
+        }
         if marker_present("pausefreeze.off") {
             log(b"pause: pausefreeze.off present -> the pause draws the game again every frame\n\0");
         }
@@ -7906,6 +7923,7 @@ impl SwitchRenderBackend {
             offscreen_dims: None,
             offscreen_target_tex: None,
             blend_rect_on: !marker_present("blendrect.off"),
+            blend_nest_on: !marker_present("blendnest.off"),
             stroke_scale_on: !marker_present("strokescale.off"),
             offscreen_clear_rect: None,
             pause_freeze_on: !marker_present("pausefreeze.off"),
@@ -9456,17 +9474,25 @@ impl SwitchRenderBackend {
         ok
     }
 
-    /// The part of the target a blend at the top level has to go over (see
-    /// "Blend boxes"). Only where stage pixels ARE target pixels: the screen,
-    /// unturned and unzoomed, with no interface transform. Never under a
-    /// scissor already in force (Stage3D), whose box ours would replace.
+    /// The part of the target a blend has to go over (see "Blend boxes").
+    /// Only where stage pixels ARE target pixels: the screen, unturned and
+    /// unzoomed, or an offscreen target, with no interface transform. Never
+    /// under a scissor already in force (Stage3D), whose box ours would replace.
     fn blend_region(&self, commands: &CommandList, w: u32, h: u32) -> BlendRegion {
+        // Inside a BitmapData.draw or a cached render the commands are placed
+        // in the target's own pixels too, and neither the turn nor the zoom
+        // reaches there (`world_matrix` gives them to the screen alone).
+        // Alien Unlock draws its whole scene into a bitmap every frame, with
+        // ~80 additive glows in it: each went over the whole 820x460 bitmap
+        // twice, 60 M pixels a frame at 307 MHz, and the frame waited for the
+        // GPU in the next readback (#140, #141).
+        let nested = self.offscreen_dims.is_some();
         if !self.blend_rect_on
-            || self.offscreen_dims.is_some()
+            || (nested && !self.blend_nest_on)
             || w == 0
             || h == 0
-            || game_rotation() != 0
-            || (self.game_layer && game_zoom_percent() != 100)
+            || (!nested && game_rotation() != 0)
+            || (!nested && self.game_layer && game_zoom_percent() != 100)
             || self.ui_scale != 1.0
             || self.ui_translate_x != 0.0
             || self.ui_translate_y != 0.0
@@ -9512,6 +9538,24 @@ impl SwitchRenderBackend {
             BlendRegion::Rect(_, _, rw, rh) => {
                 BLEND_RECT_N_CUR.fetch_add(1, Relaxed);
                 BLEND_PX_CUR.fetch_add(rw as u64 * rh as u64, Relaxed);
+            }
+        }
+    }
+
+    /// Count a blend inside an offscreen render for the SLOW line.
+    fn note_blend_region_nested(region: BlendRegion, w: u32, h: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let full = w as u64 * h as u64;
+        BLEND_NEST_N_CUR.fetch_add(1, Relaxed);
+        BLEND_NEST_PX_FULL_CUR.fetch_add(full, Relaxed);
+        match region {
+            BlendRegion::Full => {
+                BLEND_NEST_PX_CUR.fetch_add(full, Relaxed);
+            }
+            BlendRegion::Empty => {}
+            BlendRegion::Rect(_, _, rw, rh) => {
+                BLEND_NEST_RECT_N_CUR.fetch_add(1, Relaxed);
+                BLEND_NEST_PX_CUR.fetch_add(rw as u64 * rh as u64, Relaxed);
             }
         }
     }
@@ -10090,6 +10134,16 @@ impl SwitchRenderBackend {
         } else {
             0
         };
+        // The same inside offscreen renders: held to a box / run there, and
+        // the share of their targets' pixels they still went over.
+        let blend_nest_n = BLEND_NEST_N_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_nest_rect_n = BLEND_NEST_RECT_N_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_nest_full = BLEND_NEST_PX_FULL_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_nest_pct = if blend_nest_full > 0 {
+            BLEND_NEST_PX_FRAME.load(std::sync::atomic::Ordering::Relaxed).saturating_mul(100) / blend_nest_full
+        } else {
+            0
+        };
         // Periodic-spike probes (2026-08-24). `swf=` is how many SWF frames the
         // tick actually ran: 1 means the game is in slow motion, 5 means a
         // catch-up burst. `gc=` is where the collector stopped (SLEEP/MARK/
@@ -10149,7 +10203,7 @@ impl SwitchRenderBackend {
         let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
         let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} blendRect={} blendSkip={} blendPx={}% | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} blendRect={} blendSkip={} blendPx={}% blendNest={}/{} blendNestPx={}% | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
@@ -10160,6 +10214,7 @@ impl SwitchRenderBackend {
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
             off_n, off_pix, off_alloc, off_render, off_readback, off_upload,
             blend_us, blend_pct, blend_n_triv, blend_n_cx, blend_rect_n, blend_skip_n, blend_px_pct,
+            blend_nest_rect_n, blend_nest_n, blend_nest_pct,
             make_n, make_us, del_n, del_us, bf_us, evict_n,
             st_live, self.filter_tex_pool.len(), prev_swap_us, prev_period_us,
             b[BOC_NEW_N], to_us(b[BOC_NEW_T]), b[BOC_HIT], to_us(b[BOC_ZERO_T]),
@@ -16678,6 +16733,10 @@ impl RenderBackend for SwitchRenderBackend {
             (&BLEND_SKIP_N_CUR, &BLEND_SKIP_N_FRAME),
             (&BLEND_PX_CUR, &BLEND_PX_FRAME),
             (&BLEND_PX_FULL_CUR, &BLEND_PX_FULL_FRAME),
+            (&BLEND_NEST_N_CUR, &BLEND_NEST_N_FRAME),
+            (&BLEND_NEST_RECT_N_CUR, &BLEND_NEST_RECT_N_FRAME),
+            (&BLEND_NEST_PX_CUR, &BLEND_NEST_PX_FRAME),
+            (&BLEND_NEST_PX_FULL_CUR, &BLEND_NEST_PX_FULL_FRAME),
         ] {
             frame.store(cur.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
         }
@@ -17563,11 +17622,13 @@ impl CommandHandler for SwitchRenderBackend {
                 // (BitmapData.draw / cache entry). Captured BEFORE the temp
                 // render below, which temporarily repoints these.
                 let outer_target = self.offscreen_target_tex;
-                // At the top level, only the group's own box (see "Blend
-                // boxes"); nested, `blend_region` always answers Full.
+                // Only the group's own box (see "Blend boxes"), at the top
+                // level and inside an offscreen render alike.
                 let region = self.blend_region(&commands, w, h);
                 if outer_target.is_none() {
                     Self::note_blend_region(region, w, h);
+                } else {
+                    Self::note_blend_region_nested(region, w, h);
                 }
                 if let BlendRegion::Empty = region {
                     return;
@@ -17576,11 +17637,16 @@ impl CommandHandler for SwitchRenderBackend {
                     commands.execute(self);
                     return;
                 };
-                // The temp is row 0 = top, the screen row 0 = bottom.
+                // The temp is row 0 = top, the screen row 0 = bottom. An
+                // offscreen target is row 0 = top, like the temp.
                 let scissor = match region {
                     BlendRegion::Rect(x, y, rw, rh) => {
                         self.offscreen_clear_rect = Some((x, y, rw, rh));
-                        Some((x, h as i32 - y - rh, rw, rh))
+                        if outer_target.is_some() {
+                            Some((x, y, rw, rh))
+                        } else {
+                            Some((x, h as i32 - y - rh, rw, rh))
+                        }
                     }
                     _ => None,
                 };

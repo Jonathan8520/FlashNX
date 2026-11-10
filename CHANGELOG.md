@@ -15,6 +15,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ### Performance
 
+- **Games that draw their whole scene into an image every frame run several times faster** (#140, #141). An effect such as a glow, added onto that image, went over the whole image twice, even when it covered a few pixels. Alien Unlock's missions add about eighty of them every frame and ran at 8 to 12 frames per second. Each effect now only goes over its own area, as it already did on the screen: the missions run at their full 31 frames per second.
 - **Dragon City loads about 30 seconds sooner.** When it loads, it asks for the Facebook profile pictures of its first players' friends, about fifty of them, which no archive keeps. FlashNX looked for each one online three times, and the game stood still the whole time, the pause included. Profile pictures are now looked for on the card only.
 - **Games start sooner**: one kind of image games embed (32-bit lossless) was converted pixel by pixel through a slow copy. Super Mario Bros. Crossover's 4 400 images: 2 seconds less.
 - **More ActionScript 3 runs as native code**: memory reads and writes, whole-number arithmetic and calls in code compiled from C or C++ for Flash (FlasCC, Alchemy, as in emulators and physics engines), and loops check the script time limit less often. Whole numbers that a game's code always holds are now worked on directly in the processor, without checking their type at every step: with its SNES music, Super Mario Bros. Crossover runs its scripts in under a third of the time it did.
