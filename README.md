@@ -53,6 +53,7 @@ Opened from the Album, FlashNX gets too little memory for Flash games. It says s
 - A **HOME Menu icon** for any game, with its name and cover, that starts straight into it.
 - **Folders**: a game can be in several, and its file stays where it is.
 - **Saves** kept on the SD card, and **play time** for each game.
+- **1080p on a TV**: docked, games are drawn at the TV's resolution.
 - **Overclock AUTO** raises the CPU only while a game falls behind, and only if it helps.
 - **Gyroscope cursor**: aim like a Wii remote, or tilt the console like a tray with a marble on it.
 - **9 languages**, picked from the console's language.
@@ -87,6 +88,7 @@ FlashNX is only a **Switch integration layer**. All credit for the Flash emulati
 - **[Ruffle](https://github.com/ruffle-rs/ruffle)** *(Apache-2.0 / MIT)*: the Flash engine, SWF parsing and the ActionScript virtual machines. FlashNX embeds `ruffle_core`, `ruffle_render`, `ruffle_video_software`, `naga-agal` and `swf`.
 - **[devkitPro](https://devkitpro.org/) / libnx** *(ISC)*: Switch toolchain and Horizon API.
 - **[switch-mesa](https://github.com/devkitPro/pacman-packages)** *(MIT)*: OpenGL/GLES via Nouveau, the graphics backend, with a modified copy of devkitPro's **libdrm_nouveau** *(MIT)* built in (`cpp/third_party/libdrm_nouveau`).
+- **[Game_Music_Emu](https://github.com/libgme/game-music-emu)** *(LGPL-2.1 or later, with emu2413 under MIT)*: the sound chip emulators some games play their music with, built in (`cpp/third_party/gme`).
 - **Networking**: [libcurl](https://curl.se/) · [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA bundle.
 - **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (a fork patched for newlib, `third_party/jpeg-decoder-switchfork`) · `jpeg-encoder` · `png` · `image-webp` · `ttf-parser` · `ab_glyph_rasterizer` · `serde` · `serde_json` · `flate2` · `dlmalloc` · `url` · `encoding_rs`, plus Ruffle's own dependencies.
 - **[Lucide](https://lucide.dev/)** *(ISC, with icons from Feather under MIT)*: the interface icons, as a font subset built by `scripts/make_icon_font.py`; both notices are in `rust/src/backend/render/kit/icons-LICENSE.txt`.
