@@ -2,6 +2,12 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## Unreleased
+
+### Fixed
+
+- **The Import shelves show their pictures again.** The studio and random shelves, and the screenshot in a Flashpoint game's details, came from a Flashpoint server that went offline in November 2026, so every tile showed a plain colour. They now come from Flashpoint's image server, the one its own website uses.
+
 ## v2.1.0 (2026-11-11)
 
 FlashNX now draws games in 1080p on a TV, plays Super Mario Bros. Crossover with its music, runs Happy Wheels and games that draw their scene into an image much faster, and fixes several games that froze or lost their text.

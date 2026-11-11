@@ -477,11 +477,35 @@ fn decode_png(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
     Some((rgba, w, h))
 }
 
+/// Decode thumbnail BYTES for a tile drawn no bigger than `min_w` x `min_h`.
+/// A JPEG is decoded straight at 1/2, 1/4 or 1/8 of its size, the smallest
+/// the decoder's scaled IDCT offers that still covers that size: a 1342x973
+/// Flashpoint screenshot comes out 336x244. Decoded whole, it would cost tens
+/// of ms on the frame that reaps it (`pump_thumbnail_load`), where a 320 px
+/// one cost 6 to 10 ms with its upload and blur. Anything else as
+/// `decode_bytes`.
+pub fn decode_bytes_for_tile(bytes: &[u8], min_w: u16, min_h: u16) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        decode_jpeg_at_least(bytes, Some((min_w, min_h)))
+    } else {
+        decode_bytes(bytes)
+    }
+}
+
 /// Decode JPEG bytes to RGBA8 via the Switch fork of jpeg-decoder (forced
 /// single-threaded). Handles RGB24 and grayscale (L8); anything exotic is
 /// dropped (caller falls back to the default tile).
 fn decode_jpeg(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    decode_jpeg_at_least(bytes, None)
+}
+
+/// `decode_jpeg`, reduced while decoding when `at_least` is given
+/// (`decode_bytes_for_tile`).
+fn decode_jpeg_at_least(bytes: &[u8], at_least: Option<(u16, u16)>) -> Option<(std::vec::Vec<u8>, u32, u32)> {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    if let Some((w, h)) = at_least {
+        decoder.scale(w, h).ok()?;
+    }
     let pixels = decoder.decode().ok()?;
     let info = decoder.info()?;
     let (w, h) = (info.width as u32, info.height as u32);

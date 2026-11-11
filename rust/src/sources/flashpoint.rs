@@ -132,6 +132,16 @@ pub fn cover_url(id: &str) -> std::string::String {
     sharded_image_url("Logos", id)
 }
 
+/// The game's screenshot as the shelves and the details window show it, in
+/// JPEG (`?type=jpg`, the conversion Flashpoint's own site asks for). About
+/// 100 KB where the PNG can pass 1 MB; the server does not reduce it, so the
+/// decoder does (`covers::decode_bytes_for_tile`). db-api, which served it
+/// already reduced, went down on 2026-11-08 and then lost its address
+/// (flashpoint-database#11): every shelf tile fell back to its plain colour.
+pub fn screenshot_url(id: &str) -> std::string::String {
+    std::format!("{}?type=jpg", sharded_image_url("Screenshots", id))
+}
+
 /// The picker's Y toggle reaches the screenshot by swapping the `Logos/` segment
 /// of this URL for `Screenshots/` (see `library::cover_url_for_source`), rather
 /// than rebuilding it from the id, so the sharding rule lives in one place.

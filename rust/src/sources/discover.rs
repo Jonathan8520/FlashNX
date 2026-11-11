@@ -20,12 +20,8 @@
 //! découverte sans venir une fois par jour"), a studio drawn at random from a
 //! sample of the archive, another at each draw. Thousands of studios qualify.
 
-use crate::net;
 use crate::sources::flashpoint::{self, CatalogEntry};
 
-/// db-api still makes the screenshots smaller, new games' too: it fetches
-/// them from the archive's image server by the game's id.
-const SCREENSHOT_BASE: &str = "https://db-api.unstable.life/screenshot";
 
 /// What every shelf search asks for: Flash games (not animations) that run.
 /// The entries the archive flags as extreme are left out by the route itself.
@@ -252,11 +248,12 @@ pub fn family_filter(bytes: &[u8], developer: Option<&str>) -> std::vec::Vec<u8>
     serde_json::to_vec(&json).unwrap_or_else(|_| bytes.to_vec())
 }
 
-/// A game's screenshot as a tile shows it: reduced by the API (320 px wide,
-/// JPEG), about 15 KB where the full PNG is near 500 KB. Flashpoint's
-/// bandwidth is paid for by donations; a shelf costs it next to nothing.
+/// A game's screenshot as a tile shows it (`flashpoint::screenshot_url`).
+/// Ten tiles cost Flashpoint about 1 MB, a game's download a few; it was
+/// 150 KB while db-api reduced them, and Flashpoint's bandwidth is paid for
+/// by donations, so the shelves still fetch nothing they do not show.
 pub fn screenshot_url(id: &str) -> std::string::String {
-    std::format!("{}?id={}&width=320&format=jpeg&quality=80", SCREENSHOT_BASE, net::url_encode_path(id))
+    flashpoint::screenshot_url(id)
 }
 
 /// A small xorshift, seeded by the clock: the order the studios of a sample

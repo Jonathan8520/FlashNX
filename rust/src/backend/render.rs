@@ -13593,6 +13593,9 @@ impl SwitchRenderBackend {
     /// One per frame: a screenshot costs 6 to 10 ms to decode, upload and blur
     /// (measured on the importer, 2026-10-14), and two arriving together made
     /// one 15 ms frame. The others wait in their slots for the next frames.
+    ///
+    /// Decoded no bigger than a tile needs: no thumbnail is drawn past 260x162
+    /// (the import page's logo), and 320x200 is what db-api used to serve.
     fn pump_thumbnail_load(&mut self) {
         // The transfers run on net.cpp's own thread; this only reaps.
         crate::net::thumb_pump();
@@ -13615,7 +13618,7 @@ impl SwitchRenderBackend {
             // Take the bytes (frees the slot), then decode + upload + cache the
             // logo (success OR failure, so it's never retried).
             let state = match crate::net::thumb_slot_take(*slot) {
-                Some(bytes) => match crate::covers::decode_bytes(&bytes) {
+                Some(bytes) => match crate::covers::decode_bytes_for_tile(&bytes, 320, 200) {
                     Some((rgba, w, h)) => {
                         let tex = self.upload_rgba_texture(&rgba, w, h);
                         if tex != 0 {
