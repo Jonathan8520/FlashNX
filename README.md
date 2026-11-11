@@ -27,9 +27,9 @@
 
 1. You need a Switch running **Atmosphère**.
 2. Install **FlashNX** from the **[Homebrew App Store](https://hb-app.store/switch/FlashNX)**, or copy **`FlashNX.nro`** from the [latest release](https://github.com/Jonathan8520/FlashNX/releases/latest) to **`sdmc:/switch/FlashNX/`**.
-3. **Hold R while opening any game from the HOME Menu**, then pick FlashNX in the Homebrew Menu. This gives it the console's full memory.
+3. Open FlashNX **once from the Album** and choose **Install**: it puts its icon on the HOME Menu. From then on, start it from that icon, which gives it the console's full memory. This needs signature patches (sys-patch), like any homebrew icon on the HOME Menu.
 
-Opened from the Album, FlashNX gets too little memory for Flash games. It says so and offers to put its icon on the HOME Menu, which always starts it with the full memory (an icon on the HOME Menu needs signature patches, like any homebrew).
+Without signature patches, **hold R while opening any game from the HOME Menu**, then pick FlashNX in the Homebrew Menu: it gets the full memory too.
 
 ## Get games
 
@@ -90,7 +90,7 @@ FlashNX is only a **Switch integration layer**. All credit for the Flash emulati
 - **[switch-mesa](https://github.com/devkitPro/pacman-packages)** *(MIT)*: OpenGL/GLES via Nouveau, the graphics backend, with a modified copy of devkitPro's **libdrm_nouveau** *(MIT)* built in (`cpp/third_party/libdrm_nouveau`).
 - **[Game_Music_Emu](https://github.com/libgme/game-music-emu)** *(LGPL-2.1 or later, with emu2413 under MIT)*: the sound chip emulators some games play their music with, built in (`cpp/third_party/gme`).
 - **Networking**: [libcurl](https://curl.se/) · [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA bundle.
-- **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (a fork patched for newlib, `third_party/jpeg-decoder-switchfork`) · `jpeg-encoder` · `png` · `image-webp` · `ttf-parser` · `ab_glyph_rasterizer` · `serde` · `serde_json` · `flate2` · `dlmalloc` · `url` · `encoding_rs`, plus Ruffle's own dependencies.
+- **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (a fork patched for newlib, `third_party/jpeg-decoder-switchfork`) · `jpeg-encoder` · `png` · `image-webp` · `ttf-parser` · `ab_glyph_rasterizer` · `serde` · `serde_json` · `flate2` · `dlmalloc` · `url` · `encoding_rs` · `naga` · `whichlang`, plus Ruffle's own dependencies.
 - **[Lucide](https://lucide.dev/)** *(ISC, with icons from Feather under MIT)*: the interface icons, as a font subset built by `scripts/make_icon_font.py`; both notices are in `rust/src/backend/render/kit/icons-LICENSE.txt`.
 - **[Flashpoint Archive](https://flashpointarchive.org/)**: the Flash preservation project. FlashNX uses its public APIs so you can find cover art and download the games you choose. Preserved games remain the property of their original creators, and FlashNX only fetches what you explicitly request. The Flashpoint logo in the Import tab is the Flashpoint Archive's, under [CC BY 4.0](https://flashpointarchive.org/branding) (`assets/flashpoint.png`: its colorized version, cropped and resized).
 - **[Internet Archive](https://archive.org/)**: the archive.org items and Wayback Machine snapshots the Import tab can take a game from.
