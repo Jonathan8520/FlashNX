@@ -90,6 +90,19 @@ curl -X POST "$WORKER_URL/translate" -H "Content-Type: application/json" \
 # -> {"ok":true,"text":"..."}; any other text -> 403
 ```
 
+## Download badge (`/downloads`)
+
+`GET /downloads` answers the README's badge in shields.io's endpoint format:
+the downloads of every GitHub release asset plus the Homebrew App Store's
+`app_dls` for FlashNX (from its `repo.json`, which shields.io cannot filter
+itself). Kept an hour in the Worker's cache; a source that fails keeps its last
+good number in KV (`downloads:github`, `downloads:hbas`).
+
+```sh
+curl "$WORKER_URL/downloads"
+# -> {"schemaVersion":1,"label":"downloads","message":"4.9k","color":"blue","cacheSeconds":3600}
+```
+
 ## Deploy order (Worker first)
 
 The Worker tolerates a report that omits `disk_size`, `companions`,

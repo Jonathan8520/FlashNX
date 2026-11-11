@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://hb-app.store/switch/FlashNX"><img src="https://img.shields.io/badge/Homebrew%20App%20Store-FlashNX-2ea44f" alt="Homebrew App Store"></a>
   <a href="https://github.com/Jonathan8520/FlashNX/releases"><img src="https://img.shields.io/github/v/release/Jonathan8520/FlashNX?label=release" alt="Release"></a>
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fflashnx.j-levy228.workers.dev%2Fdownloads" alt="Downloads">
   <img src="https://img.shields.io/badge/platform-Nintendo%20Switch-e60012" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
 </p>

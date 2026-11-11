@@ -44,6 +44,10 @@ export default {
     if (url.pathname === "/translate") {
       return handleTranslate(request, env);
     }
+    // The README's download badge (shields.io endpoint).
+    if (url.pathname === "/downloads" && request.method === "GET") {
+      return handleDownloads(env);
+    }
 
     if (url.pathname !== "/report") {
       return json({ ok: false, error: "not found" }, 404);
@@ -802,6 +806,84 @@ function atobUtf8(b64) {
   const bin = atob(String(b64).replace(/\s/g, ""));
   const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
   return new TextDecoder().decode(bytes);
+}
+
+// Every download of FlashNX, for the README's badge: the assets of every
+// GitHub release plus the Homebrew App Store's own count (`app_dls` in its
+// repo.json, which shields.io cannot filter by itself). Answered in the
+// shields.io endpoint format, kept an hour. A source that fails keeps its last
+// good number (KV), so the badge never drops to one source's share.
+const HBAS_REPO = "https://switch.cdn.fortheusers.org/repo.json";
+const DOWNLOADS_TTL = 3600;
+
+async function handleDownloads(env) {
+  const cache = caches.default;
+  const cacheKey = new Request("https://flashnx-cache.invalid/downloads");
+  const hit = await cache.match(cacheKey);
+  if (hit) return hit;
+
+  const gh = await githubDownloads(env).catch(() => null);
+  const hbas = await hbasDownloads().catch(() => null);
+  const last = async (k) => parseInt((env.PROFILES_KV && (await env.PROFILES_KV.get(k))) || "0", 10) || 0;
+  const ghN = gh ?? (await last("downloads:github"));
+  const hbasN = hbas ?? (await last("downloads:hbas"));
+  if (env.PROFILES_KV) {
+    if (gh != null) await env.PROFILES_KV.put("downloads:github", String(gh));
+    if (hbas != null) await env.PROFILES_KV.put("downloads:hbas", String(hbas));
+  }
+
+  const res = new Response(
+    JSON.stringify({
+      schemaVersion: 1,
+      label: "downloads",
+      message: shortCount(ghN + hbasN),
+      color: "blue",
+      cacheSeconds: DOWNLOADS_TTL,
+    }),
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": `public, max-age=${DOWNLOADS_TTL}`,
+      },
+    },
+  );
+  await cache.put(cacheKey, res.clone());
+  return res;
+}
+
+async function githubDownloads(env) {
+  let total = 0;
+  for (let page = 1; page <= 10; page++) {
+    const headers = { "User-Agent": "FlashNX-worker", Accept: "application/vnd.github+json" };
+    if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+    const r = await fetch(
+      `https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=100&page=${page}`,
+      { headers },
+    );
+    if (!r.ok) throw new Error(`github ${r.status}`);
+    const releases = await r.json();
+    for (const rel of releases) {
+      for (const a of rel.assets || []) total += a.download_count || 0;
+    }
+    if (releases.length < 100) break;
+  }
+  return total;
+}
+
+async function hbasDownloads() {
+  const r = await fetch(HBAS_REPO, { headers: { "User-Agent": "FlashNX-worker" } });
+  if (!r.ok) throw new Error(`hbas ${r.status}`);
+  const d = await r.json();
+  const p = (d.packages || []).find((x) => String(x.name).toLowerCase() === "flashnx");
+  if (!p || typeof p.app_dls !== "number") throw new Error("hbas: no FlashNX");
+  return p.app_dls;
+}
+
+// 4943 -> "4.9k", like shields.io's own counters.
+function shortCount(n) {
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return `${(n / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
 }
 
 function json(obj, status = 200) {
