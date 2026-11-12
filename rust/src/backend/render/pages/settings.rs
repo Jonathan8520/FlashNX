@@ -646,6 +646,26 @@ impl SwitchRenderBackend {
         top + NOTE_LH
     }
 
+    /// The same led by an icon, for a sentence that may take more than one
+    /// line: it wraps beside the icon, up to `max_lines`. Returns its foot.
+    pub(crate) fn settings_note_icon_wrap(
+        &mut self,
+        top: f32,
+        icon: Icon,
+        text: &str,
+        ink: u32,
+        max_lines: usize,
+    ) -> f32 {
+        let lines = self.kit_wrap(text, NOTE_PX, PANE_W - 32.0, max_lines);
+        let mut cy = top + NOTE_LH * 0.5;
+        self.kit_icon(PANE_X + 4.0, cy, 16.0, icon, ink);
+        for line in &lines {
+            self.kit_text_mid(PANE_X + 4.0 + 16.0 + 10.0, cy, NOTE_PX, line, ink);
+            cy += NOTE_LH;
+        }
+        top + NOTE_LH * lines.len().max(1) as f32
+    }
+
     /// The game defaults: rows in groups that scroll above the box explaining
     /// the row with the cursor, which keeps its room at the foot of the pane.
     /// `selection` is `usize::MAX` while the cursor is in the column. Returns

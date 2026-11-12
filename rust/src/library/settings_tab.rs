@@ -1485,6 +1485,9 @@ fn help_pane(
     let (c, y, _) = b.settings_block(y + 18.0, &idea, focus.filter(|r| *r == idea_row).map(|_| 0), glide);
     cells.extend(c);
     let y = b.settings_note(y + 8.0, u.help_suggest, 3);
+    // Asked for in suggestions more than anything (#149, #151): a game that
+    // was never a free Flash game, or never left its servers, cannot come.
+    let y = b.settings_note_icon_wrap(y + 10.0, Icon::Info, u.help_no_games, ui_col::TEXT2, 2);
     b.settings_note_icon(y + 16.0, Icon::Link, "github.com/Jonathan8520/FlashNX/issues", ui_col::TEXT2);
     *hints = match focus {
         Some(r) if r == bug_row && empty => std::vec![(&[Btn::B][..], u.back)],

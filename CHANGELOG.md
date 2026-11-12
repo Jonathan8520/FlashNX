@@ -4,6 +4,10 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## Unreleased
 
+### Changed
+
+- **Settings › Help says that FlashNX can't add games**, under "Suggest an idea": it plays what Flashpoint has and the .swf files the player adds. Several ideas sent from the console asked for a game that was never a free Flash game, or that needed its online servers.
+
 ### Fixed
 
 - **The Import shelves show their pictures again.** The studio and random shelves, and the screenshot in a Flashpoint game's details, came from a Flashpoint server that went offline in November 2026, so every tile showed a plain colour. They now come from Flashpoint's image server, the one its own website uses.
