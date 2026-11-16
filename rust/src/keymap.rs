@@ -2050,6 +2050,10 @@ pub fn set_fps_counter_for(basename: &str, mode: u8) {
     write_pref(basename, "fps", mode);
 }
 
+pub fn set_antialias_for(basename: &str, mode: u8) {
+    write_pref(basename, "aa", mode);
+}
+
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
 pub const SCREEN_FILTER_COUNT: u8 = 3;
 
@@ -2262,6 +2266,37 @@ pub fn set_fps_counter(mode: u8) {
         return;
     };
     write_pref(&basename, "fps", mode);
+}
+
+/// Antialiasing states (issue #148): 0 = off, 1 = on (the edges smoothed as
+/// the game's quality asks). A switch, like the counter.
+pub const ANTIALIAS_COUNT: u8 = 2;
+
+/// Per-game antialiasing, falling back to the global default (on). Per game
+/// for the reason the counter is: the switch exists for the one game that
+/// slows down with it.
+pub fn antialias_for(basename: &str) -> u8 {
+    read_pref(basename, "aa")
+        .filter(|v| *v < ANTIALIAS_COUNT)
+        .unwrap_or_else(crate::loc::default_antialias)
+}
+
+/// Antialiasing of the ACTIVE game, the default when nothing is playing. Read
+/// at LAUNCH only (a read of the card): the per-frame answer is
+/// `render::antialias_on()`.
+pub fn antialias() -> u8 {
+    match active_game_basename() {
+        Some(b) => antialias_for(&b),
+        None => crate::loc::default_antialias(),
+    }
+}
+
+/// Persist the ACTIVE game's antialiasing, 0 included (see `set_fps_counter`).
+pub fn set_antialias(mode: u8) {
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    write_pref(&basename, "aa", mode);
 }
 
 /// Persist the ACTIVE game's stage-scaling mode. Called from the in-game pause

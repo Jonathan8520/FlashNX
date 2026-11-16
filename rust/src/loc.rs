@@ -332,6 +332,8 @@ pub struct Strings {
     pub overclock_refused: &'static str,
     /// ECRAN row + defaults row: show the frame rate over the running game (#111).
     pub set_fps: &'static str,
+    /// ÉCRAN's antialiasing switch (#148).
+    pub set_antialias: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
     /// The rotation's first option, the picture as the game draws it: "0°",
@@ -631,6 +633,7 @@ const EN: Strings = Strings {
     overclock_on: "On",
     overclock_refused: "Overclock unavailable: battery too low.",
     set_fps: "FPS counter",
+    set_antialias: "Antialiasing",
     set_rotation: "Rotation",
     rot_none: "0°",
     rot_90: "90°",
@@ -807,6 +810,7 @@ const FR: Strings = Strings {
     overclock_on: "Actif",
     overclock_refused: "Overclock indisponible\u{a0}: batterie trop faible.",
     set_fps: "Compteur FPS",
+    set_antialias: "Anticrénelage",
     set_rotation: "Rotation",
     rot_none: "0°",
     rot_90: "90°",
@@ -983,6 +987,7 @@ const ES: Strings = Strings {
     overclock_on: "Activo",
     overclock_refused: "Overclock no disponible: batería muy baja.",
     set_fps: "Contador FPS",
+    set_antialias: "Suavizado de bordes",
     set_rotation: "Rotación",
     rot_none: "0°",
     rot_90: "90°",
@@ -1160,6 +1165,7 @@ const RU: Strings = Strings {
     overclock_on: "Вкл",
     overclock_refused: "Разгон недоступен: батарея разряжена.",
     set_fps: "Счётчик FPS",
+    set_antialias: "Сглаживание",
     set_rotation: "Поворот",
     rot_none: "0°",
     rot_90: "90°",
@@ -1337,6 +1343,7 @@ const DE: Strings = Strings {
     overclock_on: "Ein",
     overclock_refused: "Overclock nicht verfügbar: Akku zu schwach.",
     set_fps: "FPS-Anzeige",
+    set_antialias: "Kantenglättung",
     set_rotation: "Drehung",
     rot_none: "0°",
     rot_90: "90°",
@@ -1514,6 +1521,7 @@ const IT: Strings = Strings {
     overclock_on: "Attivo",
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
     set_fps: "Contatore FPS",
+    set_antialias: "Antialiasing",
     set_rotation: "Rotazione",
     rot_none: "0°",
     rot_90: "90°",
@@ -1691,6 +1699,7 @@ const PT: Strings = Strings {
     overclock_on: "Ativo",
     overclock_refused: "Overclock indisponível: bateria fraca.",
     set_fps: "Contador FPS",
+    set_antialias: "Antisserrilhado",
     set_rotation: "Rotação",
     rot_none: "0°",
     rot_90: "90°",
@@ -1869,6 +1878,7 @@ const ZH: Strings = Strings {
     overclock_on: "开启",
     overclock_refused: "超频不可用：电量过低。",
     set_fps: "帧率显示",
+    set_antialias: "抗锯齿",
     set_rotation: "旋转",
     rot_none: "0°",
     rot_90: "90°",
@@ -2046,6 +2056,7 @@ const TR: Strings = Strings {
     overclock_on: "Açık",
     overclock_refused: "Overclock kullanılamaz: pil çok düşük.",
     set_fps: "FPS sayacı",
+    set_antialias: "Kenar yumuşatma",
     set_rotation: "Döndürme",
     rot_none: "0°",
     rot_90: "90°",
@@ -2356,6 +2367,19 @@ pub fn set_default_fps_counter(v: u8) {
     DEFAULT_FPS_COUNTER.store(v, Ordering::Relaxed);
 }
 
+/// Default for the antialiasing (issue #148). 1 = on: smooth edges are what
+/// Flash drew, and on every game measured it cost no frame handheld and at
+/// most one docked (`render::MSAA_MAX_SAMPLES_ABOVE_720P`).
+static DEFAULT_ANTIALIAS: AtomicU8 = AtomicU8::new(1);
+
+pub fn default_antialias() -> u8 {
+    DEFAULT_ANTIALIAS.load(Ordering::Relaxed)
+}
+
+pub fn set_default_antialias(v: u8) {
+    DEFAULT_ANTIALIAS.store(v, Ordering::Relaxed);
+}
+
 /// Display name of a power mode. Stored PER GAME (`keymap::power_mode_for`);
 /// this side is only the default a game without its own value follows.
 pub fn overclock_label(mode: u8) -> &'static str {
@@ -2614,7 +2638,7 @@ fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"overclock\": {},\n    \"fps_counter\": {},\n    \"home_view\": {},\n    \"ui_sounds\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"overclock\": {},\n    \"fps_counter\": {},\n    \"antialias\": {},\n    \"home_view\": {},\n    \"ui_sounds\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
@@ -2624,6 +2648,7 @@ fn write_settings(lang: Lang, covers: bool) -> bool {
         default_screen_filter(),
         default_power_mode(),
         default_fps_counter(),
+        default_antialias(),
         home_view(),
         ui_sounds() as u8,
     );
@@ -2701,6 +2726,9 @@ pub fn init() {
             }
             if let Some(v) = parse_u8_setting(&txt, "fps_counter", 2) {
                 set_default_fps_counter(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "antialias", 2) {
+                set_default_antialias(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "home_view", HOME_VIEW_COUNT) {
                 set_home_view(v);

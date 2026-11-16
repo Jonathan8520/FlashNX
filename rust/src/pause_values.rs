@@ -303,6 +303,7 @@ fn own_keys(key: &str) -> &'static [&'static str] {
         "ZOOM" => &["zoom", "panx", "pany"],
         "PIXELS" => &["pixels"],
         "FILTRE" => &["filter"],
+        "AA" => &["aa"],
         "FPS" => &["fps"],
         _ => &[],
     }
@@ -381,11 +382,21 @@ pub(crate) fn reset_default(key: &str) -> bool {
         "ZOOM" => crate::zoom_live(l::default_zoom(), 0, 0),
         "PIXELS" => r::set_pixel_filter(l::default_pixel_filter()),
         "FILTRE" => r::set_screen_filter(l::default_screen_filter()),
+        "AA" => r::set_antialias(l::default_antialias() == 1),
         "FPS" => r::set_fps_counter_shown(l::default_fps_counter() == 1),
         _ => {}
     }
     forget_own();
     true
+}
+
+/// A on the antialiasing switch (#148): flipped and kept, and in force on the
+/// next frame drawn, the paused picture behind the panel included.
+pub(crate) fn toggle_aa() {
+    let on = !crate::backend::render::antialias_on();
+    crate::keymap::set_antialias(on as u8);
+    crate::backend::render::set_antialias(on);
+    forget_own();
 }
 
 /// A on the counter's switch: flipped and kept. Only the flag moves: the

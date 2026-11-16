@@ -122,6 +122,13 @@ pub const GL_VIEWPORT: GLenum = 0x0BA2;
 pub const GL_RENDERBUFFER: GLenum = 0x8D41;
 pub const GL_DEPTH24_STENCIL8: GLenum = 0x88F0;
 pub const GL_DEPTH_STENCIL_ATTACHMENT: GLenum = 0x821A;
+// Multisampling (#148): the most samples a renderbuffer may have.
+pub const GL_MAX_SAMPLES: GLenum = 0x8D57;
+pub const GL_SCISSOR_BOX: GLenum = 0x0C10;
+// Timer queries: how long the GPU took over a stretch of commands.
+pub const GL_TIME_ELAPSED: GLenum = 0x88BF;
+pub const GL_QUERY_RESULT: GLenum = 0x8866;
+pub const GL_QUERY_RESULT_AVAILABLE: GLenum = 0x8867;
 
 // Stencil
 pub const GL_STENCIL_TEST: GLenum = 0x0B90;
@@ -381,6 +388,21 @@ extern "C" {
         renderbuffertarget: GLenum,
         renderbuffer: GLuint,
     );
+    pub fn glRenderbufferStorageMultisample(
+        target: GLenum,
+        samples: GLsizei,
+        internalformat: GLenum,
+        width: GLsizei,
+        height: GLsizei,
+    );
+
+    pub fn glGenQueries(n: GLsizei, ids: *mut GLuint);
+    pub fn glDeleteQueries(n: GLsizei, ids: *const GLuint);
+    pub fn glBeginQuery(target: GLenum, id: GLuint);
+    pub fn glEndQuery(target: GLenum);
+    // GLES 3.0's: switch-mesa's libraries export no 64-bit variant. A
+    // nanosecond count fits 32 bits up to 4.29 s, far past any one frame.
+    pub fn glGetQueryObjectuiv(id: GLuint, pname: GLenum, params: *mut GLuint);
 
     pub fn glGetError() -> GLenum;
     pub fn glGetFramebufferAttachmentParameteriv(

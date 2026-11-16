@@ -3976,6 +3976,7 @@ fn touch_part(s: &mut State, row: usize, part: usize) -> bool {
             s.screen = here;
             match key {
                 "FPS" => options_panel::options_toggle_fps(s, game_idx),
+                "AA" => options_panel::options_toggle_aa(s, game_idx),
                 // The zoom is a value with no options to tap: a tap on its
                 // row is a tap on the row.
                 "ZOOM" => {}
@@ -10745,6 +10746,7 @@ fn handle_screen_menu_input(s: &mut State, button: &str, game_idx: usize, mut se
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, count),
         "A" => match key {
             "FPS" => options_panel::options_toggle_fps(s, game_idx),
+            "AA" => options_panel::options_toggle_aa(s, game_idx),
             "" => {}
             k => {
                 let v = options_panel::options_value(s, game_idx, k);

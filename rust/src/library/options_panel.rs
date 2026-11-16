@@ -51,6 +51,7 @@ pub(crate) struct GamePrefs {
     pub pixels: u8,
     pub filter: u8,
     pub power: u8,
+    pub aa: u8,
     pub fps: u8,
     pub home_icon: bool,
     /// The settings this game has a value of its own for (the `.prefs` keys);
@@ -59,8 +60,9 @@ pub(crate) struct GamePrefs {
 }
 
 /// Bits of `GamePrefs::own`, and the `.prefs` keys behind each setting row:
-/// the overclock on the panel, every row of its Écran page.
-const OWN_KEYS: [(&str, &[&str]); 7] = [
+/// the overclock on the panel, every row of its Écran page. Eight: all the
+/// bits `own` has.
+const OWN_KEYS: [(&str, &[&str]); 8] = [
     ("AFFICHAGE", &["display"]),
     ("ROTATION", &["rot"]),
     ("ZOOM", &["zoom", "panx", "pany"]),
@@ -68,6 +70,7 @@ const OWN_KEYS: [(&str, &[&str]); 7] = [
     ("FILTRE", &["filter"]),
     ("OVERCLOCK", &["power"]),
     ("FPS", &["fps"]),
+    ("AA", &["aa"]),
 ];
 
 fn own_bit(key: &str) -> u8 {
@@ -102,6 +105,7 @@ pub(crate) fn game_prefs(basename: &str, path: &str) -> GamePrefs {
         pixels: keymap::pixel_filter_for(basename),
         filter: keymap::screen_filter_for(basename),
         power: keymap::power_mode_for(basename),
+        aa: keymap::antialias_for(basename),
         fps: keymap::fps_counter_for(basename),
         home_icon: shortcut_here(path),
         own: {
@@ -218,6 +222,16 @@ pub(crate) fn options_toggle_fps(s: &mut State, game_idx: usize) {
     let (b, path) = (e.basename.clone(), e.path.clone());
     let on = game_prefs(&b, &path).fps == 1;
     keymap::set_fps_counter_for(&b, (!on) as u8);
+    game_prefs_forget();
+    crate::sfx::value_changed();
+}
+
+/// A on the antialiasing switch (on the Écran page, #148): flipped and written.
+pub(crate) fn options_toggle_aa(s: &mut State, game_idx: usize) {
+    let Some(e) = s.entries.get(game_idx) else { return };
+    let (b, path) = (e.basename.clone(), e.path.clone());
+    let on = game_prefs(&b, &path).aa == 1;
+    keymap::set_antialias_for(&b, (!on) as u8);
     game_prefs_forget();
     crate::sfx::value_changed();
 }
@@ -406,6 +420,7 @@ fn screen_view(entry: &Entry, selection: usize, armed: Option<u16>) -> ScreenVie
         pixels: p.pixels,
         filter: p.filter,
         zoom: p.zoom,
+        aa: p.aa == 1,
         fps: p.fps == 1,
         own: screen_own_bits(|k| has_own(&p, k)),
         armed: armed.and(SCREEN_ITEMS.iter().position(|k| *k == key)),

@@ -810,9 +810,10 @@ enum ScreenAction {
                           // row: its percentage is changed in there.
     SCREEN_PIXELS   = 3,  // resampling: the last step of the geometry, under ZOOM
     SCREEN_FILTER   = 4,
-    SCREEN_FPS      = 5,  // adds something to the screen rather than changing
+    SCREEN_AA       = 5,  // antialiasing (#148): a switch, like the counter
+    SCREEN_FPS      = 6,  // adds something to the screen rather than changing
                           // what is on it, so it goes after the ones that do
-    SCREEN_COUNT    = 6,
+    SCREEN_COUNT    = 7,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -2549,7 +2550,7 @@ static void worker_entry(void* arg) {
                         zoom_pinching = false;
                         pan_hold = 0;
                         zoom_fine_hold = 0;
-                    } else if (screen_selection == SCREEN_FPS) {
+                    } else if (screen_selection == SCREEN_FPS || screen_selection == SCREEN_AA) {
                         // A switch: A flips it, nothing to arm.
                         if (ruffle_value_toggle(UI_KIND_SCREEN, screen_selection) > 0) {
                             ruffle_ui_sound(UI_SFX_TOGGLE);

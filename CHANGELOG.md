@@ -4,6 +4,10 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## Unreleased
 
+### Added
+
+- **Games are drawn with smooth edges (antialiasing)** (#148). Flash smooths the edges of the shapes and text it draws, as much as the game's quality setting asks; FlashNX drew them with jagged, stair-step edges. They are now smoothed as in Flash: fully in handheld, and a little less on a TV in 1080p, where the full smoothing cost some games up to a few frames per second. A new Antialiasing switch on the Écran page (in the pause, in a game's options, and in Settings for every game) turns it off for a game that slows down with it. Pictures that a game ships as images are not changed by it: Pixels sets how they look when enlarged.
+
 ### Changed
 
 - **Settings › Help says that FlashNX can't add games**, under "Suggest an idea": it plays what Flashpoint has and the .swf files the player adds. Several ideas sent from the console asked for a game that was never a free Flash game, or that needed its online servers.

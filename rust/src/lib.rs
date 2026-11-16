@@ -1745,6 +1745,8 @@ pub extern "C" fn ruffle_init() -> c_int {
     // game with the counter on would otherwise hand it to the next one, whose
     // own preference says no.
     crate::backend::render::set_fps_counter(keymap::fps_counter() == 1);
+    // Same for the antialiasing switch (#148), same reason.
+    crate::backend::render::set_antialias(keymap::antialias() == 1);
     // Same for the texture sampling (issue #108), same reason, and early enough
     // to be safe whichever way the GL side resolves it: nothing has been
     // uploaded yet at this point in the launch, so even a sampling decided at
@@ -4127,16 +4129,22 @@ pub extern "C" fn ruffle_value_cancel() -> c_int {
     pause_values::cancel() as c_int
 }
 
-/// A on a switch row (ÉCRAN's FPS counter): flipped and kept. 1 when `row` is
-/// one.
+/// A on a switch row (ÉCRAN's antialiasing and FPS counter): flipped and
+/// kept. 1 when `row` is one.
 #[no_mangle]
 pub extern "C" fn ruffle_value_toggle(kind: c_int, row: c_int) -> c_int {
-    if pause_row_key(kind, row.max(0) as usize) == Some("FPS") {
-        pause_values::confirm();
-        pause_values::toggle_fps();
-        1
-    } else {
-        0
+    match pause_row_key(kind, row.max(0) as usize) {
+        Some("AA") => {
+            pause_values::confirm();
+            pause_values::toggle_aa();
+            1
+        }
+        Some("FPS") => {
+            pause_values::confirm();
+            pause_values::toggle_fps();
+            1
+        }
+        _ => 0,
     }
 }
 
@@ -4571,6 +4579,11 @@ pub extern "C" fn ruffle_pause_touch(x: f32, y: f32, pressed: c_int, live: c_int
                 }
             }
             Some(v) => pause_values::set(v, part.min(u8::MAX as usize) as u8),
+            None if pause_row_key(live, row) == Some("AA") => {
+                pause_values::confirm();
+                pause_values::toggle_aa();
+                1
+            }
             None if pause_row_key(live, row) == Some("FPS") => {
                 pause_values::confirm();
                 pause_values::toggle_fps();

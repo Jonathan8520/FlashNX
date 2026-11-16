@@ -86,7 +86,7 @@ const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "JAQUETTES", "SONS"];
 // The game defaults in the order of the pause and of a game's options (the
 // controls, the picture as their ÉCRAN page lists it, the performance).
 const DEFAULTS_ROWS: &[&str] =
-    &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS", "OVERCLOCK"];
+    &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "AA", "FPS", "OVERCLOCK"];
 const PROFILE_ROWS: &[&str] = &["PSEUDO"];
 const HELP_ROWS: &[&str] = &["BUG", "IDEE"];
 const ABOUT_ROWS: &[&str] = &["MAJ"];
@@ -294,6 +294,13 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
             keymap::init_for_global_default();
             menu::open(None);
             s.screen = Screen::SettingsKeymapEditor;
+        }
+        (SetSection::Defaults, "AA") => {
+            let on = crate::loc::default_antialias() == 1;
+            crate::loc::set_default_antialias((!on) as u8);
+            crate::loc::save_current();
+            default_written();
+            crate::sfx::value_changed();
         }
         (SetSection::Defaults, "FPS") => {
             let on = crate::loc::default_fps_counter() == 1;
@@ -541,6 +548,11 @@ pub(crate) fn touch_part(s: &mut State, section: SetSection, idx: usize, part: u
     let changed = match (section, key) {
         (SetSection::Library, "SONS") => {
             l::set_ui_sounds(!l::ui_sounds());
+            true
+        }
+        (SetSection::Defaults, "AA") => {
+            l::set_default_antialias((l::default_antialias() != 1) as u8);
+            default_written();
             true
         }
         (SetSection::Defaults, "FPS") => {
@@ -1198,6 +1210,7 @@ fn defaults_pane(
         Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1).armed_if(is_armed("ZOOM")),
         Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pixels, value("PIXELS") as usize).armed_if(is_armed("PIXELS")),
         Row::new(Icon::Tv, lc.set_screen_filter).choice(&filters, value("FILTRE") as usize).armed_if(is_armed("FILTRE")),
+        Row::new(Icon::Sparkles, lc.set_antialias).toggle(l::default_antialias() == 1),
         Row::new(Icon::Gauge, lc.set_fps).toggle(l::default_fps_counter() == 1),
         Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at).armed_if(is_armed("OVERCLOCK")),
     ];
@@ -1236,6 +1249,7 @@ fn defaults_pane(
                 base
             }
         }
+        Some("AA") => u.help_aa,
         Some("FPS") => u.help_fps,
         Some("TOUCHES") => {
             // A game's own controls, in the words of the menus that set them,
@@ -1252,7 +1266,7 @@ fn defaults_pane(
     *hints = match key {
         _ if armed.is_some() => armed_hints(),
         Some("TOUCHES") => std::vec![(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)],
-        Some("FPS") => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
+        Some("AA" | "FPS") => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
         Some(_) => std::vec![(&[Btn::A][..], u.edit), (&[Btn::B][..], u.back)],
         None => std::vec::Vec::new(),
     };

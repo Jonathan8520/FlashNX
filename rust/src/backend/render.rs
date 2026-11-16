@@ -111,8 +111,13 @@ pub const MENU_ITEMS: &[&str] = &[
 /// ECRAN's membership rule: it previews on the frozen frame behind the panel
 /// (`ruffle_redraw_paused` draws it), so pressing A shows you exactly what you
 /// are turning on, on this game's own picture.
+/// AA (issue #148), the antialiasing switch, sits after the filter and before
+/// FPS: like the filter it changes how the picture already there looks, and
+/// it is a switch like the counter. Not next to PIXELS, which it is not:
+/// PIXELS resamples the game's bitmaps, AA smooths the edges of its vector
+/// shapes, and two neighbouring rows about "smoothing" read as one setting.
 pub const SCREEN_ITEMS: &[&str] =
-    &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS"];
+    &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "AA", "FPS"];
 
 /// Where the ÉCRAN page is open, for what its two doors do differently.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,6 +145,7 @@ pub(crate) struct ScreenView {
     pub filter: u8,
     /// The zoom's percentage.
     pub zoom: u16,
+    pub aa: bool,
     pub fps: bool,
     /// Bit `i` set: the game has a value of its own for row `i` of
     /// `SCREEN_ITEMS` (`screen_own_bits`). Else the row follows Réglages and
@@ -2774,6 +2780,228 @@ struct DroppedBitmap {
 }
 impl BitmapHandleImpl for DroppedBitmap {}
 
+// ─── Antialiasing (#148) ──────────────────────────────────────────────────────
+//
+// Flash smooths the edges of what it draws according to the stage's quality:
+// LOW not at all, MEDIUM on a 2x2 grid, HIGH and BEST on a 4x4 one (the
+// `StageQuality` reference). Ruffle's wgpu and WebGL backends do it with
+// multisampling, 1, 2 and 4 samples (`StageQuality::sample_count`, which its
+// WebGL backend caps at 4). So do we, capped at 4 the same way, and at 2 on
+// a picture above 720p (`MSAA_MAX_SAMPLES_ABOVE_720P`). The game's ÉCRAN
+// switch (`set_antialias`) turns it off for a game that slows down with it.
+//
+// The game's frame is drawn into a multisampled framebuffer and resolved onto
+// the screen (or the screen filter's target) once its display list is done:
+// the pointer and the pause, drawn after, stay as they were. The renders a
+// frame is built from (cache entries of filtered and cacheAsBitmap objects,
+// BitmapData.draw, blend groups, soft masks) each go through a multisampled
+// scratch of their nesting depth, resolved into their texture, which is what
+// wgpu's `CommandTarget` does with its own sample count.
+//
+// Only what has an edge to smooth pays for it (`commands_need_aa`): a list of
+// upright bitmaps comes out of 4 samples exactly as out of 1, so a game that
+// builds its picture by blitting tiles (catmario: ~50 `draw()` a frame into one
+// stage bitmap) keeps its old path, copy for copy.
+//
+// Markers (`marker_present`): `msaa.off` = none anywhere, `msaacache.off` =
+// the frame only, `msaaab.on` = at most 1, 2 then 4 samples, 300 frames
+// each, over and over, to compare in one session (the FPS counter then says
+// which: "AA 2x").
+
+/// Samples for a stage quality: Ruffle's mapping, at most 4.
+fn msaa_samples_for(q: StageQuality) -> u32 {
+    match q {
+        StageQuality::Low => 1,
+        StageQuality::Medium => 2,
+        _ => 4,
+    }
+}
+
+/// An offscreen render gets samples only while its pixels times its samples
+/// stay under this, 1280x720 at 4: 29.5 MB with its depth and stencil. Above
+/// it the samples halve, and at 1 it is drawn as before.
+const MSAA_OFFSCREEN_MAX_SAMPLE_PIXELS: u64 = 1280 * 720 * 4;
+/// Nesting depths with a multisampled scratch of their own (a cache entry, a
+/// blend group inside it, a group inside that). Deeper is drawn as before.
+const MSAA_OFFSCREEN_MAX_DEPTH: usize = 3;
+/// Frames a multisampled buffer may go unused before its memory goes back.
+const MSAA_IDLE_FRAMES: u32 = 600;
+/// `msaaab.on`: frames per step of the comparison.
+const MSAA_AB_FRAMES: u32 = 300;
+/// Timer queries in flight: a result is read this many frames after its frame.
+const GPU_QUERY_RING: usize = 4;
+
+/// Texture allocations the driver refused this session (`make_standalone_texture`,
+/// `MsaaTarget::alloc`). The first one turns antialiasing off for the rest of
+/// the game and gives its memory back: smooth edges are not worth a sprite.
+static GPU_ALLOC_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Running totals for the heartbeat, which prints what each window added:
+/// multisampled resolves (the frame's own, and the offscreen ones); offscreen
+/// renders that had an edge to smooth but got no samples (over the budget,
+/// too deep, or a scratch that could not be made); multisampled buffers
+/// (re)allocated.
+static MSAA_RESOLVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static MSAA_SKIPPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static MSAA_ALLOCS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The game's ÉCRAN switch (#148): on, the edges are smoothed as its quality
+/// asks; off, not at all, for a game that slows down with it. Set on every
+/// launch from the game's settings, and live from the pause.
+static ANTIALIAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_antialias(on: bool) {
+    ANTIALIAS.store(on, Ordering::Relaxed);
+}
+
+pub fn antialias_on() -> bool {
+    ANTIALIAS.load(Ordering::Relaxed)
+}
+
+/// Above 1280x720 (the TV), at most 2 samples. Measured docked at 1920x1080 on
+/// StrikeForce Kitty and its sequels: 2 cost at most 1 frame a second, 4 cost
+/// 2 to 3 and up to 11 on one screen, for edges a 1080p picture already draws
+/// finer. Handheld, 4 cost 2 to 4 ms of GPU time and no frame.
+const MSAA_MAX_SAMPLES_ABOVE_720P: u32 = 2;
+
+/// True when drawing `commands` with samples can differ from drawing them
+/// without: a shape, a line, or a bitmap or rectangle that is turned or
+/// slanted. An upright quad covers whole pixels either way.
+fn commands_need_aa(commands: &CommandList) -> bool {
+    fn turned(m: &Matrix) -> bool {
+        m.b != 0.0 || m.c != 0.0
+    }
+    commands.commands.iter().any(|c| match c {
+        Command::RenderShape { .. } | Command::DrawLine { .. } | Command::DrawLineRect { .. } => true,
+        Command::RenderBitmap { transform, .. } => turned(&transform.matrix),
+        Command::DrawRect { matrix, .. } => turned(matrix),
+        Command::Blend(inner, _) => commands_need_aa(inner),
+        Command::RenderAlphaMask { maskee_commands, mask_commands } => {
+            commands_need_aa(maskee_commands) || commands_need_aa(mask_commands)
+        }
+        Command::RenderStage3D { .. }
+        | Command::PushMask
+        | Command::ActivateMask
+        | Command::DeactivateMask
+        | Command::PopMask => false,
+    })
+}
+
+/// Report the GL errors already pending, so the check after an allocation
+/// sees only its own (the heartbeat reports the rest every 60 frames, and
+/// these would otherwise vanish here).
+fn drain_gl_errors_logged(context: &str) {
+    for _ in 0..16 {
+        let err = unsafe { glGetError() };
+        if err == GL_NO_ERROR {
+            return;
+        }
+        log_str(&std::format!("gl err: 0x{:04X} (pending {})\n", err, context));
+    }
+}
+
+/// A multisampled colour buffer and its depth and stencil, behind one
+/// framebuffer (#148).
+#[derive(Default)]
+struct MsaaTarget {
+    fbo: GLuint,
+    color: GLuint,
+    depth_stencil: GLuint,
+    dims: (u32, u32),
+    samples: u32,
+    last_used: u32,
+}
+
+impl MsaaTarget {
+    fn live(&self) -> bool {
+        self.fbo != 0
+    }
+
+    /// RGBA8 plus D24S8, 4 + 4 bytes a sample.
+    fn bytes(&self) -> u64 {
+        if !self.live() {
+            return 0;
+        }
+        self.dims.0 as u64 * self.dims.1 as u64 * self.samples as u64 * 8
+    }
+
+    fn free(&mut self) {
+        unsafe {
+            if self.fbo != 0 {
+                glDeleteFramebuffers(1, &self.fbo);
+            }
+            if self.color != 0 {
+                glDeleteRenderbuffers(1, &self.color);
+            }
+            if self.depth_stencil != 0 {
+                glDeleteRenderbuffers(1, &self.depth_stencil);
+            }
+        }
+        *self = MsaaTarget::default();
+    }
+
+    /// Storage for `w` x `h` at `samples`, replacing what it held. The
+    /// framebuffer bound on entry is bound again on the way out. False, and
+    /// nothing held, if the driver refuses any part of it.
+    fn alloc(&mut self, w: u32, h: u32, samples: u32, what: &str) -> bool {
+        self.free();
+        MSAA_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        let ok = unsafe {
+            let mut prev: GLint = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev);
+            drain_gl_errors_logged("before an antialiasing buffer");
+            let mut rb: [GLuint; 2] = [0; 2];
+            glGenRenderbuffers(2, rb.as_mut_ptr());
+            self.color = rb[0];
+            self.depth_stencil = rb[1];
+            glBindRenderbuffer(GL_RENDERBUFFER, self.color);
+            glRenderbufferStorageMultisample(
+                GL_RENDERBUFFER, samples as GLsizei, GL_RGBA8, w as GLsizei, h as GLsizei,
+            );
+            glBindRenderbuffer(GL_RENDERBUFFER, self.depth_stencil);
+            glRenderbufferStorageMultisample(
+                GL_RENDERBUFFER, samples as GLsizei, GL_DEPTH24_STENCIL8, w as GLsizei, h as GLsizei,
+            );
+            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+            let err = glGetError();
+            let mut fbo: GLuint = 0;
+            glGenFramebuffers(1, &mut fbo);
+            self.fbo = fbo;
+            let mut status = 0;
+            if err == GL_NO_ERROR && fbo != 0 && rb[0] != 0 && rb[1] != 0 {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+                glFramebufferRenderbuffer(
+                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, self.color,
+                );
+                glFramebufferRenderbuffer(
+                    GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, self.depth_stencil,
+                );
+                status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                glBindFramebuffer(GL_FRAMEBUFFER, prev as GLuint);
+            }
+            if err != GL_NO_ERROR || status != GL_FRAMEBUFFER_COMPLETE {
+                log_str(&std::format!(
+                    "msaa: {} {}x{} at {}x refused (gl err 0x{:04X}, fbo 0x{:04X})\n",
+                    what, w, h, samples, err, status,
+                ));
+                if err == GL_OUT_OF_MEMORY {
+                    GPU_ALLOC_FAILS.fetch_add(1, Ordering::Relaxed);
+                }
+                false
+            } else {
+                true
+            }
+        };
+        if !ok {
+            self.free();
+            return false;
+        }
+        self.dims = (w, h);
+        self.samples = samples;
+        true
+    }
+}
+
 /// SyncHandle for `BitmapData.draw()` and `apply_filter`. Holds a NON-owning GL texture id (the
 /// temp the draw commands were rendered into) plus the dirty region to read
 /// back. Ruffle stores this in the BitmapData's `GpuModified` state and calls
@@ -2889,6 +3117,7 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
             // giving up), and the log line itself goes over the network.
             static FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            GPU_ALLOC_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if n <= 20 || n % 500 == 0 {
                 let msg = std::format!(
                     "make_standalone_texture: glTexImage2D failed for {}x{} ({} KB), skipped (GPU OOM?, failures={})\n",
@@ -3659,6 +3888,52 @@ pub struct SwitchRenderBackend {
     /// pass. Captured rather than assumed to be 0: the frame's target is whatever
     /// the C++ side bound, exactly like the offscreen paths' `prev_fbo`.
     screen_filter_prev_fbo: GLint,
+
+    /// Antialiasing (#148), see "Antialiasing" above `MsaaTarget`. The frame's
+    /// multisampled target, the framebuffer it resolves onto, and whether the
+    /// game's display list is being drawn into it right now.
+    msaa_frame: MsaaTarget,
+    msaa_frame_prev_fbo: GLint,
+    msaa_frame_on: bool,
+    /// Samples the last frame was drawn with (1 = none), for the heartbeat.
+    msaa_frame_samples: u32,
+    /// A size and sample count the driver refused for the frame: not asked again.
+    msaa_frame_refused: Option<(u32, u32, u32)>,
+    /// One multisampled scratch per nesting depth of offscreen renders.
+    msaa_scratch: Vec<MsaaTarget>,
+    /// How many multisampled offscreen renders enclose the one being drawn.
+    msaa_depth: usize,
+    /// The multisampled framebuffer the enclosing offscreen render draws into,
+    /// when it has one: what a nested blend binds again to composite its group
+    /// onto (without one it re-attaches `offscreen_target_tex`).
+    offscreen_target_msaa: Option<GLuint>,
+    /// Single-sample framebuffer a texture is attached to while it is copied
+    /// into a multisampled buffer or one is resolved onto it. Nothing else.
+    msaa_io_fbo: GLuint,
+    /// The stage's quality (`set_quality`), and the one a BitmapData.draw asked
+    /// for while it is drawn (`drawWithQuality`, else the stage's).
+    stage_quality: StageQuality,
+    draw_quality: Option<StageQuality>,
+    /// GL_MAX_SAMPLES, read on first use (0 = not yet).
+    msaa_max_samples: u32,
+    /// `msaa.off` absent, `msaacache.off` absent, `msaaab.on` present.
+    msaa_on: bool,
+    msaa_cache_on: bool,
+    msaa_ab: bool,
+    /// `GPU_ALLOC_FAILS` when last looked at, and whether a refusal since the
+    /// game started has turned antialiasing off for good.
+    msaa_fails_seen: u32,
+    msaa_starved: bool,
+    /// The region a BitmapData.draw reads and writes (x, y, w, h, row 0 = top),
+    /// so that a multisampled render copies in and resolves only that much.
+    offscreen_io_rect: Option<(i32, i32, i32, i32)>,
+    /// GPU time of each frame's display list (timer queries, read a few frames
+    /// late so nothing waits), summed over the heartbeat window.
+    gpu_queries: [GLuint; GPU_QUERY_RING],
+    gpu_query_pending: [bool; GPU_QUERY_RING],
+    gpu_time_sum_us: u64,
+    gpu_time_max_us: u64,
+    gpu_time_n: u32,
 
     color_matrix_filter: ColorMatrixFilterProgram,
     unpremult_blit: BlitProgram,
@@ -7676,6 +7951,15 @@ impl SwitchRenderBackend {
         if marker_present("strokescale.off") {
             log(b"shapes: strokescale.off present -> shapes tessellated at scale 1\n\0");
         }
+        if marker_present("msaa.off") {
+            log(b"msaa: msaa.off present -> no antialiasing\n\0");
+        }
+        if marker_present("msaacache.off") {
+            log(b"msaa: msaacache.off present -> offscreen renders drawn without samples\n\0");
+        }
+        if marker_present("msaaab.on") {
+            log(b"msaa: A/B on -> at most 1, 2 then 4 samples, 300 frames each\n\0");
+        }
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
@@ -7847,6 +8131,29 @@ impl SwitchRenderBackend {
             screen_filter_rbo: 0,
             screen_filter_dims: (0, 0),
             screen_filter_prev_fbo: 0,
+            msaa_frame: MsaaTarget::default(),
+            msaa_frame_prev_fbo: 0,
+            msaa_frame_on: false,
+            msaa_frame_samples: 1,
+            msaa_frame_refused: None,
+            msaa_scratch: Vec::new(),
+            msaa_depth: 0,
+            offscreen_target_msaa: None,
+            msaa_io_fbo: 0,
+            stage_quality: StageQuality::High,
+            draw_quality: None,
+            msaa_max_samples: 0,
+            msaa_on: !marker_present("msaa.off"),
+            msaa_cache_on: !marker_present("msaacache.off"),
+            msaa_ab: marker_present("msaaab.on"),
+            msaa_fails_seen: GPU_ALLOC_FAILS.load(Ordering::Relaxed),
+            msaa_starved: false,
+            offscreen_io_rect: None,
+            gpu_queries: [0; GPU_QUERY_RING],
+            gpu_query_pending: [false; GPU_QUERY_RING],
+            gpu_time_sum_us: 0,
+            gpu_time_max_us: 0,
+            gpu_time_n: 0,
             unpremult_blit,
             premult_blit,
             blur_filter,
@@ -8119,6 +8426,17 @@ impl SwitchRenderBackend {
     ) -> bool {
         // Taken first, so no render nested inside this one sees it.
         let clear_rect = self.offscreen_clear_rect.take();
+        let io_rect = self.offscreen_io_rect.take();
+        // Antialiasing (#148): through this depth's multisampled scratch when
+        // the quality asks for it and there is an edge to smooth.
+        let samples = self.msaa_offscreen_samples(tex_w, tex_h, &commands);
+        if samples > 1 {
+            if let Some(fbo) = self.msaa_scratch_for(tex_w, tex_h, samples) {
+                return self.render_commands_to_texture_msaa(
+                    fbo, tex, tex_w, tex_h, commands, clear, clear_rect.or(io_rect),
+                );
+            }
+        }
         if self.offscreen_fbo == 0 {
             unsafe {
                 let mut fbo: GLuint = 0;
@@ -8215,14 +8533,17 @@ impl SwitchRenderBackend {
         self.mask = MaskState::default();
         let prev_offscreen = self.offscreen_dims;
         let prev_target_tex = self.offscreen_target_tex;
+        let prev_target_msaa = self.offscreen_target_msaa;
         self.offscreen_dims = Some((tex_w, tex_h));
         self.offscreen_target_tex = Some(tex);
+        self.offscreen_target_msaa = None;
         self.gl_state.invalidate();
 
         commands.execute(self);
 
         self.offscreen_dims = prev_offscreen;
         self.offscreen_target_tex = prev_target_tex;
+        self.offscreen_target_msaa = prev_target_msaa;
         self.mask = prev_mask;
         unsafe {
             // No explicit colour detach: rebinding this FBO always overwrites
@@ -8364,6 +8685,418 @@ impl SwitchRenderBackend {
             glEnable(GL_BLEND);
         }
         self.gl_state.invalidate();
+    }
+
+    // ─── Antialiasing (#148), see "Antialiasing" above `MsaaTarget` ──────────
+
+    /// The most samples the driver takes (GL_MAX_SAMPLES), read once.
+    fn msaa_max(&mut self) -> u32 {
+        if self.msaa_max_samples == 0 {
+            let mut v: GLint = 0;
+            unsafe { glGetIntegerv(GL_MAX_SAMPLES, &mut v) };
+            self.msaa_max_samples = (v.max(1)) as u32;
+            log_str(&std::format!("msaa: the driver takes up to {} samples\n", self.msaa_max_samples));
+        }
+        self.msaa_max_samples
+    }
+
+    /// Samples for `quality` right now: none with `msaa.off`, the game's
+    /// switch off, or after the driver refused memory; at most 2 above 720p
+    /// (`MSAA_MAX_SAMPLES_ABOVE_720P`), and with `msaaab.on` at most 1, 2
+    /// then 4 in turn.
+    fn msaa_samples_wanted(&mut self, quality: StageQuality) -> u32 {
+        if !self.msaa_on || self.msaa_starved || !antialias_on() {
+            return 1;
+        }
+        let (w, h) = self.physical_dims();
+        let mut cap = if w as u64 * h as u64 > 1280 * 720 { MSAA_MAX_SAMPLES_ABOVE_720P } else { 4 };
+        if self.msaa_ab {
+            cap = cap.min([1, 2, 4][((self.frame_count / MSAA_AB_FRAMES) % 3) as usize]);
+        }
+        msaa_samples_for(quality).min(cap).min(self.msaa_max()).max(1)
+    }
+
+    /// Bytes the antialiasing buffers hold.
+    fn msaa_bytes(&self) -> u64 {
+        self.msaa_frame.bytes() + self.msaa_scratch.iter().map(|t| t.bytes()).sum::<u64>()
+    }
+
+    /// At the top of a frame, nothing bound: a texture the driver refused since
+    /// the last look turns antialiasing off for the rest of the game and gives
+    /// its memory back; a buffer nobody used for `MSAA_IDLE_FRAMES` goes back too.
+    fn msaa_frame_start(&mut self) {
+        let fails = GPU_ALLOC_FAILS.load(Ordering::Relaxed);
+        if fails != self.msaa_fails_seen {
+            self.msaa_fails_seen = fails;
+            if !self.msaa_starved {
+                self.msaa_starved = true;
+                let held = self.msaa_bytes();
+                self.msaa_frame.free();
+                for t in self.msaa_scratch.iter_mut() {
+                    t.free();
+                }
+                log_str(&std::format!(
+                    "msaa: the driver refused memory, no antialiasing for this game ({} MB given back)\n",
+                    held >> 20,
+                ));
+            }
+        }
+        let now = self.frame_count;
+        if self.msaa_frame.live() && now.wrapping_sub(self.msaa_frame.last_used) > MSAA_IDLE_FRAMES {
+            self.msaa_frame.free();
+            log(b"msaa: frame buffer unused, freed\n\0");
+        }
+        for t in self.msaa_scratch.iter_mut() {
+            if t.live() && now.wrapping_sub(t.last_used) > MSAA_IDLE_FRAMES {
+                t.free();
+            }
+        }
+    }
+
+    /// Draw this frame's display list into the multisampled target, when the
+    /// stage's quality asks for samples and the list has an edge to smooth.
+    /// False: it is drawn straight to the current target, as before.
+    fn begin_msaa_frame(&mut self, commands: &CommandList) -> bool {
+        self.msaa_frame_samples = 1;
+        let samples = self.msaa_samples_wanted(self.stage_quality);
+        if samples <= 1 || !commands_need_aa(commands) {
+            return false;
+        }
+        // The screen's own shape, like the screen filter's target: it IS the
+        // screen until the resolve.
+        let (w, h) = self.physical_dims();
+        if w == 0 || h == 0 {
+            return false;
+        }
+        let f = &self.msaa_frame;
+        if !(f.live() && f.dims == (w, h) && f.samples == samples) {
+            if self.msaa_frame_refused == Some((w, h, samples)) {
+                return false;
+            }
+            if !self.msaa_frame.alloc(w, h, samples, "frame") {
+                self.msaa_frame_refused = Some((w, h, samples));
+                return false;
+            }
+            log_str(&std::format!(
+                "msaa: frame {}x{} at {}x ({} MB)\n",
+                w, h, samples, self.msaa_frame.bytes() >> 20,
+            ));
+        }
+        self.msaa_frame.last_used = self.frame_count;
+        unsafe {
+            let mut prev: GLint = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev);
+            self.msaa_frame_prev_fbo = prev;
+            RT_BIND_CUR.fetch_add(1, Ordering::Relaxed);
+            glBindFramebuffer(GL_FRAMEBUFFER, self.msaa_frame.fbo);
+        }
+        self.msaa_frame_on = true;
+        self.msaa_frame_samples = samples;
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// Resolve the frame onto the framebuffer it was drawn in place of, and
+    /// leave that one bound.
+    fn end_msaa_frame(&mut self) {
+        self.msaa_frame_on = false;
+        let (w, h) = self.msaa_frame.dims;
+        let (src, dst) = (self.msaa_frame.fbo, self.msaa_frame_prev_fbo as GLuint);
+        unsafe {
+            // A blit is clipped by the scissor and nothing else.
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            if scissor_was_on {
+                glDisable(GL_SCISSOR_TEST);
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+            glBlitFramebuffer(
+                0, 0, w as GLint, h as GLint,
+                0, 0, w as GLint, h as GLint,
+                GL_COLOR_BUFFER_BIT, GL_NEAREST,
+            );
+            glBindFramebuffer(GL_FRAMEBUFFER, dst);
+            if scissor_was_on {
+                glEnable(GL_SCISSOR_TEST);
+            }
+        }
+        MSAA_RESOLVES.fetch_add(1, Ordering::Relaxed);
+        self.gl_state.invalidate();
+    }
+
+    /// The single-sample framebuffer textures are attached to for the copies
+    /// in and out of a multisampled buffer.
+    fn msaa_io(&mut self) -> GLuint {
+        if self.msaa_io_fbo == 0 {
+            let mut f: GLuint = 0;
+            unsafe { glGenFramebuffers(1, &mut f) };
+            self.msaa_io_fbo = f;
+        }
+        self.msaa_io_fbo
+    }
+
+    /// Resolve `rect` (x, y, w, h) of the multisampled framebuffer `src` onto
+    /// `tex`, at the same place, then bind `then`.
+    fn msaa_resolve_into(&mut self, src: GLuint, tex: GLuint, rect: (i32, i32, i32, i32), then: GLuint) {
+        let io = self.msaa_io();
+        let (x, y, w, h) = rect;
+        unsafe {
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            if scissor_was_on {
+                glDisable(GL_SCISSOR_TEST);
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, io);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glBlitFramebuffer(x, y, x + w, y + h, x, y, x + w, y + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            // Let go of the texture while its framebuffer is bound: GL detaches
+            // a deleted texture only from a BOUND framebuffer.
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, then);
+            if scissor_was_on {
+                glEnable(GL_SCISSOR_TEST);
+            }
+        }
+        MSAA_RESOLVES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Copy `rect` of `tex` into the multisampled framebuffer `dst`, every
+    /// sample of a pixel taking its texel, and leave `dst` bound. Desktop GL
+    /// allows a blit into a multisampled buffer (GLES does not).
+    fn msaa_seed_from(&mut self, tex: GLuint, dst: GLuint, rect: (i32, i32, i32, i32)) {
+        let io = self.msaa_io();
+        let (x, y, w, h) = rect;
+        unsafe {
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            if scissor_was_on {
+                glDisable(GL_SCISSOR_TEST);
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, io);
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+            glBlitFramebuffer(x, y, x + w, y + h, x, y, x + w, y + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, dst);
+            if scissor_was_on {
+                glEnable(GL_SCISSOR_TEST);
+            }
+        }
+    }
+
+    /// Copy the current target's colour over `rect` (target pixels), or all of
+    /// its `w` x `h`, into `tex` at the same place: a complex blend's backdrop.
+    /// The multisampled frame is resolved there instead, `glCopyTexSubImage2D`
+    /// cannot read a multisampled buffer.
+    fn copy_target_into(&mut self, tex: GLuint, rect: Option<(i32, i32, i32, i32)>, w: u32, h: u32) {
+        let r = rect.unwrap_or((0, 0, w as i32, h as i32));
+        if self.msaa_frame_on && self.offscreen_dims.is_none() {
+            let src = self.msaa_frame.fbo;
+            self.msaa_resolve_into(src, tex, r, src);
+            return;
+        }
+        unsafe {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, r.0, r.1, r.0, r.1, r.2, r.3);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    /// Samples for an offscreen render of `w` x `h` drawing `commands` now: the
+    /// quality's (a draw()'s own, else the stage's), halved until it fits
+    /// `MSAA_OFFSCREEN_MAX_SAMPLE_PIXELS`. 1 = drawn as before.
+    fn msaa_offscreen_samples(&mut self, w: u32, h: u32, commands: &CommandList) -> u32 {
+        if !self.msaa_cache_on {
+            return 1;
+        }
+        let q = self.draw_quality.unwrap_or(self.stage_quality);
+        let mut s = self.msaa_samples_wanted(q);
+        if s <= 1 || !commands_need_aa(commands) {
+            return 1;
+        }
+        if self.msaa_depth >= MSAA_OFFSCREEN_MAX_DEPTH {
+            MSAA_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            return 1;
+        }
+        let px = w as u64 * h as u64;
+        while s > 1 && px * s as u64 > MSAA_OFFSCREEN_MAX_SAMPLE_PIXELS {
+            s /= 2;
+        }
+        if s <= 1 {
+            MSAA_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        s
+    }
+
+    /// The framebuffer of this depth's scratch, holding at least `w` x `h` at
+    /// `samples`: grown to hold both sizes while that fits the budget, else
+    /// made for this one. None if the driver refuses it, and then no offscreen
+    /// render is multisampled for the rest of the game.
+    fn msaa_scratch_for(&mut self, w: u32, h: u32, samples: u32) -> Option<GLuint> {
+        let d = self.msaa_depth;
+        while self.msaa_scratch.len() <= d {
+            self.msaa_scratch.push(MsaaTarget::default());
+        }
+        let now = self.frame_count;
+        let t = &mut self.msaa_scratch[d];
+        let fits = t.live() && t.samples == samples && t.dims.0 >= w && t.dims.1 >= h;
+        if !fits {
+            let (mut nw, mut nh) = (w, h);
+            if t.live() && t.samples == samples {
+                let (uw, uh) = (t.dims.0.max(w), t.dims.1.max(h));
+                if uw as u64 * uh as u64 * samples as u64 <= MSAA_OFFSCREEN_MAX_SAMPLE_PIXELS {
+                    nw = uw;
+                    nh = uh;
+                }
+            }
+            if !t.alloc(nw, nh, samples, "scratch") {
+                self.msaa_cache_on = false;
+                MSAA_SKIPPED.fetch_add(1, Ordering::Relaxed);
+                log(b"msaa: offscreen renders drawn without samples from now on\n\0");
+                return None;
+            }
+        }
+        t.last_used = now;
+        Some(t.fbo)
+    }
+
+    /// `render_commands_to_texture` through the multisampled scratch `fbo`:
+    /// the same clears, the commands, then a resolve onto `tex`. Only `region`
+    /// is copied in, cleared and resolved: the box of a blend held to its box,
+    /// the region a BitmapData.draw reads back, else the whole texture. The
+    /// scratch has its own stencil, so unlike the shared one of the
+    /// single-sample path, clearing it cannot touch an enclosing mask.
+    #[allow(clippy::too_many_arguments)]
+    fn render_commands_to_texture_msaa(
+        &mut self,
+        fbo: GLuint,
+        tex: GLuint,
+        tex_w: u32,
+        tex_h: u32,
+        commands: CommandList,
+        clear: Option<Color>,
+        region: Option<(i32, i32, i32, i32)>,
+    ) -> bool {
+        let region = region.unwrap_or((0, 0, tex_w as i32, tex_h as i32));
+        let mut prev_fbo: GLint = 0;
+        let mut prev_vp: [GLint; 4] = [0; 4];
+        let bind_timer = PrimTimer::new(&PRIM_RTBIND_CUR);
+        unsafe {
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+            glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+        }
+        RT_BIND_CUR.fetch_add(1, Ordering::Relaxed);
+        if clear.is_none() {
+            // Composite mode: what the texture holds is the backdrop.
+            self.msaa_seed_from(tex, fbo, region);
+        } else {
+            unsafe { glBindFramebuffer(GL_FRAMEBUFFER, fbo) };
+        }
+        unsafe {
+            glViewport(0, 0, tex_w as GLsizei, tex_h as GLsizei);
+            glClearStencil(0);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glStencilMask(0xFF);
+            // A scissor in force (Stage3D's SetScissorRectangle) is put back
+            // after the clear, box and all.
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            let mut prev_box: [GLint; 4] = [0; 4];
+            if scissor_was_on {
+                glGetIntegerv(GL_SCISSOR_BOX, prev_box.as_mut_ptr());
+            }
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(region.0, region.1, region.2, region.3);
+            if let Some(c) = clear {
+                glClearColor(
+                    c.r as GLfloat / 255.0,
+                    c.g as GLfloat / 255.0,
+                    c.b as GLfloat / 255.0,
+                    c.a as GLfloat / 255.0,
+                );
+                glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            } else {
+                glClear(GL_STENCIL_BUFFER_BIT);
+            }
+            if scissor_was_on {
+                glScissor(prev_box[0], prev_box[1], prev_box[2], prev_box[3]);
+            } else {
+                glDisable(GL_SCISSOR_TEST);
+            }
+            // Same accumulation as the single-sample path.
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(
+                GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+            );
+            glDisable(GL_STENCIL_TEST);
+        }
+        drop(bind_timer);
+
+        let prev_mask = self.mask;
+        self.mask = MaskState::default();
+        let prev_offscreen = self.offscreen_dims;
+        let prev_target_tex = self.offscreen_target_tex;
+        let prev_target_msaa = self.offscreen_target_msaa;
+        self.offscreen_dims = Some((tex_w, tex_h));
+        self.offscreen_target_tex = Some(tex);
+        self.offscreen_target_msaa = Some(fbo);
+        self.msaa_depth += 1;
+        self.gl_state.invalidate();
+
+        commands.execute(self);
+
+        self.msaa_depth -= 1;
+        self.offscreen_dims = prev_offscreen;
+        self.offscreen_target_tex = prev_target_tex;
+        self.offscreen_target_msaa = prev_target_msaa;
+        self.mask = prev_mask;
+        self.msaa_resolve_into(fbo, tex, region, prev_fbo as GLuint);
+        unsafe {
+            glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.mask_restore_gl();
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// One frame's GPU span: the result of the timer query `GPU_QUERY_RING`
+    /// frames back, if it is in (never waited for), then a new query begun.
+    /// The span runs from when the GPU starts this frame's commands to when it
+    /// finishes them, idle gaps waiting for the CPU included: it is the GPU's
+    /// time only when the GPU is the one behind.
+    fn gpu_query_begin(&mut self) {
+        let slot = (self.frame_count as usize) % GPU_QUERY_RING;
+        unsafe {
+            if self.gpu_queries[slot] == 0 {
+                let mut q: GLuint = 0;
+                glGenQueries(1, &mut q);
+                self.gpu_queries[slot] = q;
+            }
+            let q = self.gpu_queries[slot];
+            if q == 0 {
+                return;
+            }
+            if self.gpu_query_pending[slot] {
+                let mut avail: GLuint = 0;
+                glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &mut avail);
+                if avail != 0 {
+                    let mut ns: GLuint = 0;
+                    glGetQueryObjectuiv(q, GL_QUERY_RESULT, &mut ns);
+                    let us = ns as u64 / 1000;
+                    self.gpu_time_sum_us += us;
+                    self.gpu_time_max_us = self.gpu_time_max_us.max(us);
+                    self.gpu_time_n += 1;
+                }
+                self.gpu_query_pending[slot] = false;
+            }
+            glBeginQuery(GL_TIME_ELAPSED, q);
+            self.gpu_query_pending[slot] = true;
+        }
+    }
+
+    fn gpu_query_end(&mut self) {
+        unsafe { glEndQuery(GL_TIME_ELAPSED) };
     }
 
     fn draw_filter_pass(
@@ -10203,11 +10936,12 @@ impl SwitchRenderBackend {
         let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
         let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} blendRect={} blendSkip={} blendPx={}% blendNest={}/{} blendNestPx={}% | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} aa={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} blendRect={} blendSkip={} blendPx={}% blendNest={}/{} blendNestPx={}% | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
             cache_us, rtbind_us, content_us, filtchain_us, mktex_n, mktex_us, fb.filter_budget,
+            self.msaa_frame_samples,
             prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
@@ -10769,6 +11503,7 @@ impl SwitchRenderBackend {
                     "ZOOM" => Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1),
                     "PIXELS" => Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, v.pixels as usize),
                     "FILTRE" => Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, v.filter as usize),
+                    "AA" => Row::new(Icon::Sparkles, lc.set_antialias).toggle(v.aa),
                     _ => Row::new(Icon::Gauge, lc.set_fps).toggle(v.fps),
                 };
                 // "par défaut" on a row with no value of its own; not on the
@@ -10798,6 +11533,7 @@ impl SwitchRenderBackend {
             "ZOOM" => zoom_help,
             "PIXELS" => u.help_pixels,
             "FILTRE" => u.help_filter,
+            "AA" => u.help_aa,
             "FPS" => u.help_fps,
             _ => "",
         };
@@ -10809,7 +11545,7 @@ impl SwitchRenderBackend {
         // game has a value of its own to drop.
         let a_verb = match key {
             "ZOOM" if in_game => u.zoom_frame,
-            "FPS" => u.change,
+            "AA" | "FPS" => u.change,
             _ => u.edit,
         };
         let own_here = SCREEN_ITEMS.iter().position(|k| *k == key).is_some_and(own);
@@ -10852,6 +11588,7 @@ impl SwitchRenderBackend {
             pixels: pv::current(V::Pixels),
             filter: pv::current(V::Filter),
             zoom: game_zoom_percent(),
+            aa: antialias_on(),
             fps: fps_counter_on(),
             own: screen_own_bits(|k| !pv::follows_default(k)),
             armed: armed.and_then(|k| SCREEN_ITEMS.iter().position(|x| *x == k)),
@@ -11074,6 +11811,13 @@ impl SwitchRenderBackend {
             )
         };
         const PX: f32 = 15.0;
+        // With `msaaab.on`, the samples of the frame on the counter: a console
+        // capture then says which step of the comparison it shows.
+        let text = if self.msaa_ab {
+            std::format!("{}  \u{00B7}  AA {}x", text, self.msaa_frame_samples)
+        } else {
+            text
+        };
         const H: f32 = 28.0;
         const MARGIN: f32 = 14.0;
         // The LOGICAL viewport, portrait while the picture is turned (#78):
@@ -15577,7 +16321,7 @@ impl RenderBackend for SwitchRenderBackend {
         &mut self,
         handle: BitmapHandle,
         commands: CommandList,
-        _quality: StageQuality,
+        quality: StageQuality,
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
         let _pt = PrimTimer::new(&PRIM_OFFSCREEN_CUR);
@@ -15723,7 +16467,17 @@ impl RenderBackend for SwitchRenderBackend {
         };
         let rendered = {
             let _t = PrimTimer::new(&PRIM_OFF_RENDER_CUR);
-            self.render_commands_to_texture(temp_id, tex_w, tex_h, commands, clear)
+            // Antialiasing (#148): at the quality the draw() asked for, and
+            // copied in and resolved over the region written back only. A
+            // dropped surface hands its whole temp back, so all of it.
+            self.draw_quality = Some(quality);
+            if !matches!(backing, Backing::Dropped) {
+                self.offscreen_io_rect = Some((rx as i32, ry as i32, rw as i32, rh as i32));
+            }
+            let ok = self.render_commands_to_texture(temp_id, tex_w, tex_h, commands, clear);
+            self.draw_quality = None;
+            self.offscreen_io_rect = None;
+            ok
         };
         if !rendered {
             self.offscreen_temp_retired.push(temp);
@@ -15972,6 +16726,10 @@ impl RenderBackend for SwitchRenderBackend {
         // is where the writes held back during the tick are sent, once each
         // rather than once per overwritten intermediate state.
         self.flush_pending_upload();
+        // Antialiasing buffers (#148): given back after a refusal or when idle,
+        // before anything is drawn into them.
+        self.msaa_frame_start();
+        self.gpu_query_begin();
         // Drain any pending arena frees enqueued by `GpuDraw::drop`. Doing
         // this at frame boundaries (not from Drop itself) keeps us off the
         // hook for &mut access during arbitrary Ruffle drops, and keeps
@@ -16546,8 +17304,30 @@ impl RenderBackend for SwitchRenderBackend {
                     HEAP_USED.load(Relaxed)
                 }
             };
+            // Antialiasing (#148): the last frame's samples, the memory its
+            // buffers hold, and what this window added (resolves, renders left
+            // without samples, buffers made); the GPU span of the window's
+            // frames (`gpu_query_begin`), average and worst.
+            let aa_samples = self.msaa_frame_samples;
+            let aa_mb = self.msaa_bytes() >> 20;
+            let (aa_res, aa_skip, aa_alloc) = {
+                use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+                static SEEN: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+                let now = [
+                    MSAA_RESOLVES.load(Relaxed),
+                    MSAA_SKIPPED.load(Relaxed),
+                    MSAA_ALLOCS.load(Relaxed),
+                ];
+                let d = |i: usize| now[i].wrapping_sub(SEEN[i].swap(now[i], Relaxed));
+                (d(0), d(1), d(2))
+            };
+            let gpu_n = core::mem::replace(&mut self.gpu_time_n, 0);
+            let gpu_sum = core::mem::replace(&mut self.gpu_time_sum_us, 0);
+            let gpu_max = core::mem::replace(&mut self.gpu_time_max_us, 0);
+            let gpu_avg_ms = std::format!("{:.1}", gpu_sum as f64 / gpu_n.max(1) as f64 / 1000.0);
+            let gpu_max_ms = std::format!("{:.1}", gpu_max as f64 / 1000.0);
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} res={}x{} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} dlMB={}/{}({}) drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} res={}x{} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} dlMB={}/{}({}) drawbox={} maxalpha={:.2} aa={}x/{}MB q={} aaRes={} aaSkip={} aaAlloc={} gpuSpan={}/{}ms({})\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -16613,6 +17393,15 @@ impl RenderBackend for SwitchRenderBackend {
                     None => std::string::String::from("(nothing drawn)"),
                 },
                 core::mem::replace(&mut self.draw_max_alpha, 0.0),
+                aa_samples,
+                aa_mb,
+                self.stage_quality,
+                aa_res,
+                aa_skip,
+                aa_alloc,
+                gpu_avg_ms,
+                gpu_max_ms,
+                gpu_n,
             );
             let mut bytes = msg.into_bytes();
             bytes.push(0);
@@ -16652,6 +17441,9 @@ impl RenderBackend for SwitchRenderBackend {
         // false leaves the original path byte for byte.
         let filter_mode = screen_filter();
         let filtered = filter_mode != 0 && self.begin_screen_filter();
+        // Antialiasing (#148): the display list goes into a multisampled
+        // target, resolved below onto the screen or the filter's target.
+        let msaa = self.begin_msaa_frame(&commands);
         let (phys_w, phys_h) = self.physical_dims();
 
         unsafe {
@@ -16692,12 +17484,16 @@ impl RenderBackend for SwitchRenderBackend {
             glDisable(GL_STENCIL_TEST);
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         }
+        if msaa {
+            self.end_msaa_frame();
+        }
         // Resolve the captured frame onto the real framebuffer through the filter
         // shader. After this the target is the screen again, so the cursor overlay
         // and the pause panel drawn later stay crisp and unfiltered.
         if filtered {
             self.end_screen_filter(filter_mode);
         }
+        self.gpu_query_end();
         // Mirror the actual GL state we just wrote so the cache stays
         // truthful for any post-frame work (e.g. the cursor overlay).
         self.gl_state.invalidate();
@@ -16993,7 +17789,22 @@ impl RenderBackend for SwitchRenderBackend {
         "switch-mesa-gl"
     }
 
-    fn set_quality(&mut self, _quality: StageQuality) {}
+    /// The stage's quality, which sets the antialiasing's samples (#148):
+    /// LOW none, MEDIUM 2, HIGH and BEST 4. Ruffle calls this when the player
+    /// is built (HIGH) and whenever the game changes it.
+    fn set_quality(&mut self, quality: StageQuality) {
+        if quality != self.stage_quality {
+            static CHANGES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = CHANGES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 20 || n % 500 == 0 {
+                log_str(&std::format!(
+                    "msaa: stage quality {} -> {} ({} samples, changes={})\n",
+                    self.stage_quality, quality, msaa_samples_for(quality), n,
+                ));
+            }
+        }
+        self.stage_quality = quality;
+    }
 
     fn compile_pixelbender_shader(
         &mut self,
@@ -17625,6 +18436,8 @@ impl CommandHandler for SwitchRenderBackend {
                 // (BitmapData.draw / cache entry). Captured BEFORE the temp
                 // render below, which temporarily repoints these.
                 let outer_target = self.offscreen_target_tex;
+                // ...and its multisampled framebuffer, when it has one (#148).
+                let outer_msaa = self.offscreen_target_msaa;
                 // Only the group's own box (see "Blend boxes"), at the top
                 // level and inside an offscreen render alike.
                 let region = self.blend_region(&commands, w, h);
@@ -17660,11 +18473,21 @@ impl CommandHandler for SwitchRenderBackend {
                     // attachment detached. Re-attach the enclosing offscreen
                     // target + its viewport so the composite below lands on it
                     // (top-level leaves the main framebuffer bound — no-op).
+                    // A multisampled enclosing render draws into its own
+                    // framebuffer, which the temp render left alone: bind it
+                    // again, its texture only gets the result at its resolve.
                     if let Some(outer) = outer_target {
                         unsafe {
                             RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
-                            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outer, 0);
+                            match outer_msaa {
+                                Some(fbo) => glBindFramebuffer(GL_FRAMEBUFFER, fbo),
+                                None => {
+                                    glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                                    glFramebufferTexture2D(
+                                        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outer, 0,
+                                    );
+                                }
+                            }
                             glViewport(0, 0, w as GLsizei, h as GLsizei);
                         }
                     }
@@ -17767,15 +18590,7 @@ impl CommandHandler for SwitchRenderBackend {
             }
             _ => None,
         };
-        unsafe {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, parent.texture);
-            match scissor {
-                Some((x, y, rw, rh)) => glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, y, x, y, rw, rh),
-                None => glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w as GLsizei, h as GLsizei),
-            }
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
+        self.copy_target_into(parent.texture, scissor, w, h);
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
         if self.render_commands_to_texture(current.texture, w, h, commands, Some(transparent)) {
             self.blend_window = self.blend_window.saturating_add(1);
@@ -17825,6 +18640,14 @@ impl Drop for SwitchRenderBackend {
             if self.pause_snap_fbo != 0 {
                 glDeleteFramebuffers(1, &self.pause_snap_fbo);
             }
+            if self.msaa_io_fbo != 0 {
+                glDeleteFramebuffers(1, &self.msaa_io_fbo);
+            }
+            for q in self.gpu_queries {
+                if q != 0 {
+                    glDeleteQueries(1, &q);
+                }
+            }
             if self.offscreen_depth_stencil != 0 {
                 glDeleteRenderbuffers(1, &self.offscreen_depth_stencil);
             }
@@ -17833,6 +18656,11 @@ impl Drop for SwitchRenderBackend {
             }
             // vertex_arena / index_arena released via their Drop impls.
             // Programs freed by their respective Drop impls.
+        }
+        // The antialiasing buffers: up to ~60 MB the next game may need.
+        self.msaa_frame.free();
+        for t in self.msaa_scratch.iter_mut() {
+            t.free();
         }
     }
 }
