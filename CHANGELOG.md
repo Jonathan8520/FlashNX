@@ -15,6 +15,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 ### Fixed
 
 - **The Import shelves show their pictures again.** The studio and random shelves, and the screenshot in a Flashpoint game's details, came from a Flashpoint server that went offline in November 2026, so every tile showed a plain colour. They now come from Flashpoint's image server, the one its own website uses.
+- **Games locked to their own website start again** (#152). Some games ask the web page for its address and refuse to start anywhere else; FlashNX answered every game with a Disney address, so Futurama Saw Game stopped on its "more games at inkagames.com" screen. FlashNX now answers with the game's own page, which Flashpoint keeps in the game's folder. Disney's games keep the answer they were made to work with.
 
 ## v2.1.0 (2026-11-11)
 

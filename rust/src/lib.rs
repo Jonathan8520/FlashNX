@@ -1170,8 +1170,9 @@ fn fmt_ext_value(v: &ExtValue) -> std::string::String {
 ///
 /// For now this LOGS every call + every callback the game registers (the exact
 /// contract we need to emulate) and returns best-effort benign values so the
-/// game's API is more likely to init offline: a Disney URL for domain/site-lock
-/// queries, `true` for readiness/registration probes, `null` otherwise. Once a
+/// game's API is more likely to init offline: the game's own page for
+/// domain/site-lock queries (a Disney URL for Disney's games), `true` for
+/// readiness/registration probes, `null` otherwise. Once a
 /// hardware capture shows the real message protocol, the responses here become
 /// the actual container emulation (config, site-lock OK, LSO-backed saves).
 struct ContainerInterface;
@@ -1206,6 +1207,93 @@ struct PageCtx {
 }
 
 static PAGE_CTX: Mutex<Option<PageCtx>> = Mutex::new(None);
+
+/// The address of the page the game is played from, as `window.location.href`
+/// gives it: site locks ask for it and refuse to start anywhere else (#152,
+/// Futurama Saw Game only plays under `http://www.inkagames.com` or
+/// `http://www.patajuegos.com`, and showed its "more games at inkagames.com"
+/// screen instead). Looked up the first time a game asks, never at launch:
+/// most games never do.
+enum EiPage {
+    /// No game started yet.
+    Unset,
+    /// The game's tree and movie address, not searched yet.
+    Pending(std::path::PathBuf, std::string::String),
+    Known(std::string::String),
+}
+static EI_PAGE: Mutex<EiPage> = Mutex::new(EiPage::Unset);
+/// What every location query was answered with before #152, and still is for
+/// Disney's games: Agent P's lock passes on it (`733aaa4`).
+const EI_DISNEY_PAGE: &str = "http://play.lol.disney.com/";
+
+/// The page's address, found once per game. A movie on a Disney host, or one
+/// with no web address (a loose SWF), keeps the old answer.
+fn ei_page_url() -> std::string::String {
+    let Ok(mut g) = EI_PAGE.lock() else {
+        return std::string::String::from(EI_DISNEY_PAGE);
+    };
+    let found = match &*g {
+        EiPage::Known(u) => return u.clone(),
+        EiPage::Unset => return std::string::String::from(EI_DISNEY_PAGE),
+        EiPage::Pending(dir, movie) => {
+            let web = movie.starts_with("http://") || movie.starts_with("https://");
+            if !web || movie.to_ascii_lowercase().contains("disney") {
+                std::string::String::from(EI_DISNEY_PAGE)
+            } else {
+                page_url_for(dir, movie).unwrap_or_else(|| movie.clone())
+            }
+        }
+    };
+    log_str(&std::format!("EI page: {}\n", found));
+    *g = EiPage::Known(found.clone());
+    found
+}
+
+/// The page that embeds the movie, from the game's Flashpoint tree. The page
+/// is often on another host than the movie (Futurama Saw Game: the movie on
+/// `www.inkagames.info`, its page on `www.inkagames.com`), so every host is
+/// searched, the movie's own first, a few folders deep. Bounded: a big tree
+/// (SSF2) costs at most 64 folder listings, once.
+fn page_url_for(sidecar_dir: &std::path::Path, movie_url: &str) -> Option<std::string::String> {
+    let rest = movie_url.split_once("://")?.1.split(['?', '#']).next()?;
+    let mut segs: std::vec::Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let swf_name = segs.pop()?.to_ascii_lowercase();
+    let movie_host = segs.first().map(|h| h.to_ascii_lowercase()).unwrap_or_default();
+    let root = sidecar_dir.to_string_lossy().into_owned();
+    let mut hosts = crate::library::list_dirs_all(&root);
+    hosts.sort_by_key(|h| !h.eq_ignore_ascii_case(&movie_host));
+    let mut dirs_left = 64usize;
+    for host in hosts {
+        let mut queue: std::vec::Vec<(std::string::String, usize)> = std::vec![(host, 0)];
+        let mut i = 0;
+        while i < queue.len() && dirs_left > 0 {
+            let (rel, depth) = queue[i].clone();
+            i += 1;
+            dirs_left -= 1;
+            let abs = std::format!("{}/{}", root, rel);
+            for name in crate::library::list_files_top(&abs) {
+                let lower = name.to_ascii_lowercase();
+                if !(lower.ends_with(".html") || lower.ends_with(".htm")) {
+                    continue;
+                }
+                let path = std::format!("{}/{}", abs, name);
+                let Some(b) = crate::sources::gamezip::read_file_bounded(&path, 256 * 1024) else {
+                    continue;
+                };
+                if std::string::String::from_utf8_lossy(&b).to_ascii_lowercase().contains(&swf_name) {
+                    return Some(std::format!("http://{}/{}", rel, name));
+                }
+            }
+            if depth < 4 {
+                for d in crate::library::list_dirs_all(&abs) {
+                    queue.push((std::format!("{}/{}", rel, d), depth + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Asked for by the movie, built at the top of the next frame (C++,
 /// `ruffle_page_nav_follow`): never from inside the call that asked.
 static PAGE_NAV_PENDING: Mutex<Option<PageNav>> = Mutex::new(None);
@@ -1448,7 +1536,18 @@ impl ExternalInterfaceProvider for ContainerInterface {
             || lname.contains("referrer")
             || lname.contains("host")
         {
-            ExtValue::String(std::string::String::from("http://play.lol.disney.com/"))
+            // The page the game is played from (#152). `location.hostname` and
+            // `document.domain` give its host alone; Disney's answer is kept
+            // word for word, as its lock was passed with it.
+            let page = ei_page_url();
+            let host_only = lname.contains("hostname") || lname.contains("domain") || lname.contains("location.host");
+            if host_only && page != EI_DISNEY_PAGE {
+                let host = page.split_once("://").map(|(_, r)| r).unwrap_or(&page);
+                let host = host.split('/').next().unwrap_or(host);
+                ExtValue::String(std::string::String::from(host))
+            } else {
+                ExtValue::String(page)
+            }
         } else if lname.contains("available")
             || lname.contains("isready")
             || lname.contains("ready")
@@ -1827,6 +1926,10 @@ pub extern "C" fn ruffle_init() -> c_int {
             .and_then(|(html, base)| page_ctx_for(html, base, &sidecar_dir, &source_label));
         if let Ok(mut g) = PAGE_CTX.lock() {
             *g = ctx;
+        }
+        // Its address too, kept while the page swaps movies (#152).
+        if let Ok(mut g) = EI_PAGE.lock() {
+            *g = EiPage::Pending(sidecar_dir.clone(), source_label.clone());
         }
     }
 
@@ -4853,6 +4956,9 @@ pub extern "C" fn ruffle_library_reset() {
     // The page of the game left (#140, #141) has nothing to say to the next.
     if let Ok(mut g) = PAGE_CTX.lock() {
         *g = None;
+    }
+    if let Ok(mut g) = EI_PAGE.lock() {
+        *g = EiPage::Unset;
     }
     if let Ok(mut g) = PAGE_NAV_CURRENT.lock() {
         *g = None;
