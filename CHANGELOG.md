@@ -10,6 +10,7 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ### Changed
 
+- **Import: Left on the first source and Right on the last go to the top of the page**, instead of the other end of the list.
 - **Settings › Help says that FlashNX can't add games**, under "Suggest an idea": it plays what Flashpoint has and the .swf files the player adds. Several ideas sent from the console asked for a game that was never a free Flash game, or that needed its online servers.
 
 ### Fixed

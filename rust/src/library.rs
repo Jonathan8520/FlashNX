@@ -8083,7 +8083,8 @@ fn handle_distant_idle_input(
     // first band to the last source, Down on the last source to the first
     // band) and a held one stops, like every list. Left and Right walk a
     // shelf's tiles, coming round on a press; in the sources they skip five,
-    // as in every other list.
+    // as in every other list, except that Left on the first source and Right
+    // on the last go to the first band.
     let n = importer_view(s).len();
     let last = n + IMPORTER_PINNED_ROWS - 1;
     // A row the page no longer has (the list shrank under the cursor, a shelf
@@ -8158,8 +8159,18 @@ fn handle_distant_idle_input(
                 selection = k * SHELF_COLS + cols[next.min(cols.len() - 1)];
             } else if selection > IMPORTER_ADD_ROW && n > 0 {
                 let k = selection - IMPORTER_PINNED_ROWS;
-                let step = if back { -(LIST_SKIP as isize) } else { LIST_SKIP as isize };
-                selection = list_step_wrap(k, step, n) + IMPORTER_PINNED_ROWS;
+                if (back && k == 0) || (!back && k + 1 >= n) {
+                    // Left on the first source and Right on the last go to the
+                    // top of the page, as Down on the last does, instead of
+                    // round the sources (Jonathan, 2.1.1). Held, they stop on
+                    // the edge, like every edge.
+                    if nav_may_wrap() {
+                        selection = top_band(s);
+                    }
+                } else {
+                    let step = if back { -(LIST_SKIP as isize) } else { LIST_SKIP as isize };
+                    selection = list_step_wrap(k, step, n) + IMPORTER_PINNED_ROWS;
+                }
             }
         }
         "Plus" => {
