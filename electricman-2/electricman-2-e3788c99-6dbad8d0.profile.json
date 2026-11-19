@@ -12,10 +12,10 @@
     "A": "D",
     "B": "S",
     "Down": "Down",
-    "L": "Escape",
+    "L": "Q",
     "Left": "Left",
     "Plus": "P",
-    "R": "Enter",
+    "R": "W",
     "Right": "Right",
     "SL": "Escape",
     "SR": "Enter",
@@ -23,6 +23,7 @@
     "StickLLeft": "Left",
     "StickLRight": "Right",
     "StickLUp": "Up",
+    "StickRPress": "E",
     "Up": "Up",
     "X": "Space",
     "Y": "A",
@@ -88,5 +89,5 @@
   "combo_layers_p3": {},
   "combo_layers_p4": {},
   "cursor_speed": -1,
-  "show_cursor": true
+  "show_cursor": false
 }
