@@ -8861,26 +8861,73 @@ impl SwitchRenderBackend {
     }
 
     /// Copy `rect` of `tex` into the multisampled framebuffer `dst`, every
-    /// sample of a pixel taking its texel, and leave `dst` bound. Desktop GL
-    /// allows a blit into a multisampled buffer (GLES does not).
+    /// sample of a pixel taking its texel, and leave `dst` bound.
+    ///
+    /// Drawn as a quad, not blitted. Desktop GL allows a blit into a
+    /// multisampled buffer, but on the Switch's driver it did not fill every
+    /// sample: the others kept what an earlier render had left there, and the
+    /// resolve averaged them in. Papa Louie 3, which draws its character into
+    /// a BitmapData that already holds the other poses, lost the legs to two
+    /// faded grey bands. A draw covers every sample of the pixels it covers.
     fn msaa_seed_from(&mut self, tex: GLuint, dst: GLuint, rect: (i32, i32, i32, i32)) {
-        let io = self.msaa_io();
         let (x, y, w, h) = rect;
+        let (mut tw, mut th): (GLint, GLint) = (0, 0);
+        unsafe {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &mut tw);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &mut th);
+            glBindFramebuffer(GL_FRAMEBUFFER, dst);
+        }
+        if w <= 0 || h <= 0 || tw <= 0 || th <= 0 {
+            unsafe { glBindTexture(GL_TEXTURE_2D, 0) };
+            self.gl_state.invalidate();
+            return;
+        }
+        // The identity colour matrix, as `blit_identity`: the texel as it is.
+        let prog = self.color_matrix_filter.program;
+        let u_src_uv = self.color_matrix_filter.u_src_uv;
+        let u_mat = self.color_matrix_filter.u_color_mat;
+        let u_extra = self.color_matrix_filter.u_color_extra;
+        #[rustfmt::skip]
+        let id: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        // A sharp sampler left by a bitmap draw would not matter at 1:1, but
+        // the cache only invalidates on the way out (see `draw_filter_pass`).
+        self.gl_state.clear_sampler();
         unsafe {
             let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
-            if scissor_was_on {
-                glDisable(GL_SCISSOR_TEST);
-            }
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, io);
-            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
-            glBlitFramebuffer(x, y, x + w, y + h, x, y, x + w, y + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
-            glBindFramebuffer(GL_FRAMEBUFFER, dst);
+            glDisable(GL_SCISSOR_TEST);
+            glViewport(x, y, w, h);
+            glDisable(GL_BLEND);
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glUseProgram(prog);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glUniform4f(
+                u_src_uv,
+                x as f32 / tw as f32,
+                y as f32 / th as f32,
+                w as f32 / tw as f32,
+                h as f32 / th as f32,
+            );
+            glUniformMatrix4fv(u_mat, 1, GL_FALSE, id.as_ptr());
+            glUniform4f(u_extra, 0.0, 0.0, 0.0, 0.0);
+            glBindVertexArray(self.bitmap_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glEnable(GL_BLEND);
             if scissor_was_on {
                 glEnable(GL_SCISSOR_TEST);
             }
         }
+        self.gl_state.invalidate();
     }
 
     /// Copy the current target's colour over `rect` (target pixels), or all of

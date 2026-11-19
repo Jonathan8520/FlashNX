@@ -91,6 +91,8 @@ pub const GL_FUNC_REVERSE_SUBTRACT: GLenum = 0x800B;
 
 // Textures
 pub const GL_TEXTURE_2D: GLenum = 0x0DE1;
+pub const GL_TEXTURE_WIDTH: GLenum = 0x1000;
+pub const GL_TEXTURE_HEIGHT: GLenum = 0x1001;
 pub const GL_RGBA: GLenum = 0x1908;
 pub const GL_RGBA8: GLenum = 0x8058;
 pub const GL_TEXTURE0: GLenum = 0x84C0;
@@ -363,6 +365,7 @@ extern "C" {
         filter: GLenum,
     );
     pub fn glGetIntegerv(pname: GLenum, params: *mut GLint);
+    pub fn glGetTexLevelParameteriv(target: GLenum, level: GLint, pname: GLenum, params: *mut GLint);
     pub fn glIsEnabled(cap: GLenum) -> GLboolean;
     pub fn glReadPixels(
         x: GLint,
