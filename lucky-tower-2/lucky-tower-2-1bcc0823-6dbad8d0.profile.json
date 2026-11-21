@@ -24,7 +24,7 @@
     "StickLRight": "Right",
     "StickLUp": "Up",
     "Up": "Up",
-    "X": "Up",
+    "X": "D",
     "Y": "S",
     "ZL": "Right click",
     "ZR": "Left click"
@@ -88,5 +88,5 @@
   "combo_layers_p3": {},
   "combo_layers_p4": {},
   "cursor_speed": -1,
-  "show_cursor": false
+  "show_cursor": true
 }
