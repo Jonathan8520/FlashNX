@@ -10,7 +10,7 @@
   "verified": false,
   "bindings": {
     "A": "Space",
-    "B": "W",
+    "B": "Up",
     "Down": "",
     "L": "",
     "Left": "Left",
@@ -20,11 +20,11 @@
     "SL": "",
     "SR": "",
     "StickLDown": "",
-    "StickLLeft": "A",
-    "StickLRight": "D",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
     "StickLUp": "",
     "Up": "",
-    "X": "W",
+    "X": "Up",
     "Y": "Space",
     "ZL": "Right click",
     "ZR": "Left click"
